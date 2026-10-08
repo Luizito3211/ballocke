@@ -315,9 +315,14 @@ local function point_forbidden(r, p, x, y)
     local f, cfg, field_cfg = r.field, r.config.referee, r.config.field
     if x < f.outer_left + p.radius or x > f.outer_right - p.radius or
        y < f.outer_top + p.radius or y > f.outer_bottom - p.radius then return true end
-    if r.restartType == "lateral" or r.restartType == "corner" then
+    if r.restartType == "lateral" then
+        local x1, x2, _, zone_top, zone_bottom = referee.throw_in_geometry(r)
+        local min_x, max_x = x1 - p.radius, x2 + p.radius
+        local min_y, max_y = zone_top - p.radius, zone_bottom + p.radius
+        if x >= min_x and x <= max_x and y >= min_y and y <= max_y then return true end
+    elseif r.restartType == "corner" then
         local dx, dy = x - r.restartX, y - r.restartY
-        local radius = cfg.restartZoneRadius + p.radius
+        local radius = cfg.cornerZoneRadius + p.radius
         if dx * dx + dy * dy < radius * radius then return true end
     elseif r.restartType == "goal_kick" then
         local left_side = r.restartX < 0
@@ -336,6 +341,20 @@ local function point_forbidden(r, p, x, y)
     return false
 end
 
+function referee.throw_in_geometry(r)
+    local f, cfg = r.field, r.config.referee
+    local x1 = math.max(f.left, r.restartX - cfg.throwInLineLength * 0.5)
+    local x2 = math.min(f.right, r.restartX + cfg.throwInLineLength * 0.5)
+    local line_y = r.restartY < 0 and f.top + cfg.throwInLineOffset or f.bottom - cfg.throwInLineOffset
+    local zone_top = r.restartY < 0 and f.outer_top or line_y
+    local zone_bottom = r.restartY < 0 and line_y or f.outer_bottom
+    return x1, x2, line_y, zone_top, zone_bottom
+end
+
+function referee.is_point_restricted(r, p, x, y)
+    return point_forbidden(r, p, x or p.x, y or p.y)
+end
+
 local function consider(r, p, x, y, best_x, best_y, best_d)
     if point_forbidden(r, p, x, y) then return best_x, best_y, best_d end
     local dx, dy = x - p.x, y - p.y
@@ -344,13 +363,41 @@ local function consider(r, p, x, y, best_x, best_y, best_d)
     return best_x, best_y, best_d
 end
 
+local function clear_of_frozen_ball(r, p, x, y, margin)
+    if not r.ballFrozen then return true end
+    local dx, dy = x - p.x, y - p.y
+    local length_sq = dx * dx + dy * dy
+    if length_sq < 0.000001 then return true end
+    local t = ((r.ball.x - p.x) * dx + (r.ball.y - p.y) * dy) / length_sq
+    t = math.max(0, math.min(1, t))
+    local near_x, near_y = p.x + dx * t, p.y + dy * t
+    local bx, by = near_x - r.ball.x, near_y - r.ball.y
+    local clearance = p.radius + r.ball.radius + margin
+    return bx * bx + by * by >= clearance * clearance
+end
+
 function referee.restriction_target(r, p)
     if not referee.is_restart_state(r.state) or p.team == r.restartTeam or
        not point_forbidden(r, p, p.x, p.y) then return p.x, p.y end
     local best_x, best_y, best_d = p.x, p.y, math.huge
     local f, cfg, field_cfg = r.field, r.config.referee, r.config.field
-    if r.restartType == "lateral" or r.restartType == "corner" or r.restartType == "kickoff" then
-        local radius = r.restartType == "kickoff" and f.center_radius or cfg.restartZoneRadius
+    if r.restartType == "lateral" then
+        local x1, x2, _, zone_top, zone_bottom = referee.throw_in_geometry(r)
+        local min_x, max_x = x1 - p.radius, x2 + p.radius
+        local min_y, max_y = zone_top - p.radius, zone_bottom + p.radius
+        local inward_y = r.restartY < 0 and max_y + cfg.zoneTargetMargin or min_y - cfg.zoneTargetMargin
+        local edge_x = math.max(min_x, math.min(max_x, p.x))
+        if clear_of_frozen_ball(r, p, edge_x, inward_y, cfg.zoneTargetMargin) then
+            best_x, best_y, best_d = consider(r, p, edge_x, inward_y, best_x, best_y, best_d)
+        end
+        local side_y = math.max(f.outer_top + p.radius,
+            math.min(f.outer_bottom - p.radius, p.y))
+        best_x, best_y, best_d = consider(r, p, min_x - cfg.zoneTargetMargin, side_y,
+            best_x, best_y, best_d)
+        best_x, best_y, best_d = consider(r, p, max_x + cfg.zoneTargetMargin, side_y,
+            best_x, best_y, best_d)
+    elseif r.restartType == "corner" or r.restartType == "kickoff" then
+        local radius = r.restartType == "kickoff" and f.center_radius or cfg.cornerZoneRadius
         radius = radius + p.radius + cfg.zoneTargetMargin
         local count = cfg.zoneDirections
         for i = 0, count - 1 do
@@ -398,11 +445,20 @@ function referee.draw_zone(r, colors)
     local f, cfg = r.field, r.config
     local tint = r.restartTeam == "red" and colors.score_p1 or colors.score_p2
     love.graphics.setColor(tint[1], tint[2], tint[3], cfg.referee.zoneFillAlpha)
-    if r.restartType == "lateral" or r.restartType == "corner" then
-        love.graphics.circle("fill", r.restartX, r.restartY, cfg.referee.restartZoneRadius)
+    if r.restartType == "lateral" then
+        local x1, x2, line_y, zone_top, zone_bottom = referee.throw_in_geometry(r)
+        love.graphics.rectangle("fill", x1, zone_top, x2 - x1, zone_bottom - zone_top)
         love.graphics.setColor(tint[1], tint[2], tint[3], cfg.referee.zoneLineAlpha)
         love.graphics.setLineWidth(cfg.referee.zoneLineWidth)
-        love.graphics.circle("line", r.restartX, r.restartY, cfg.referee.restartZoneRadius)
+        love.graphics.line(x1, line_y, x2, line_y)
+        local cap = cfg.referee.throwInLineEndMarkLength * 0.5
+        love.graphics.line(x1, line_y - cap, x1, line_y + cap)
+        love.graphics.line(x2, line_y - cap, x2, line_y + cap)
+    elseif r.restartType == "corner" then
+        love.graphics.circle("fill", r.restartX, r.restartY, cfg.referee.cornerZoneRadius)
+        love.graphics.setColor(tint[1], tint[2], tint[3], cfg.referee.zoneLineAlpha)
+        love.graphics.setLineWidth(cfg.referee.zoneLineWidth)
+        love.graphics.circle("line", r.restartX, r.restartY, cfg.referee.cornerZoneRadius)
     elseif r.restartType == "goal_kick" then
         local left_side = r.restartX < 0
         local x = left_side and f.left or f.right - cfg.field.penalty_area_depth
@@ -425,7 +481,7 @@ function referee.draw_frozen_ring(r, colors)
     local tint = r.restartTeam == "red" and colors.score_p1 or colors.score_p2
     local pulse = love.timer.getTime()
     local cfg = r.config.referee
-    local radius = r.ball.radius + cfg.frozenRingOffset + math.sin(pulse * cfg.frozenRingPulseRate) * cfg.frozenRingPulseAmplitude
+    local radius = cfg.frozenRingRadius + math.sin(pulse * cfg.frozenRingPulseRate) * cfg.frozenRingPulseAmplitude
     love.graphics.setColor(tint[1], tint[2], tint[3], cfg.frozenRingAlpha)
     love.graphics.setLineWidth(cfg.frozenRingLineWidth)
     love.graphics.circle("line", r.ball.x, r.ball.y, radius)

@@ -592,6 +592,56 @@ function tests.run()
 
     do
         local referee = require "src.referee"
+        local checkpoints = {
+            0,
+            f.left + config.referee.cornerMargin,
+            f.left + config.field.penalty_area_depth,
+            f.right - config.referee.cornerMargin,
+            f.right - config.field.penalty_area_depth,
+        }
+        local ok, details = config.referee.cornerZoneRadius == 350, ""
+        for side_index = 1, 2 do
+            local restart_y = side_index == 1 and f.top or f.bottom
+            for point_index = 1, #checkpoints do
+                local g = game_mod.new(config, "1v1", 2)
+                local r, field = g.referee, g.field
+                local x = checkpoints[point_index]
+                referee.begin_restart(r, "lateral", "red", x, restart_y)
+                local x1, x2, line_y, zone_top, zone_bottom = referee.throw_in_geometry(r)
+                local expected_line = side_index == 1 and field.top + config.referee.throwInLineOffset or
+                    field.bottom - config.referee.throwInLineOffset
+                if x1 < field.left or x2 > field.right or x2 - x1 > config.referee.throwInLineLength or
+                   math.abs(line_y - expected_line) > 0.001 or zone_top >= zone_bottom then ok = false end
+
+                local taker, opponent = g.players[1], g.players[2]
+                taker.x, taker.y, taker.vx, taker.vy = field.right - 500, 0, 0, 0
+                local start_y = side_index == 1 and field.outer_top + opponent.radius + 1 or
+                    field.outer_bottom - opponent.radius - 1
+                opponent.x, opponent.y, opponent.vx, opponent.vy = x, start_y, 0, 0
+                if not referee.is_point_restricted(r, opponent) then ok = false end
+                local target_x, target_y = referee.restriction_target(r, opponent)
+                if referee.is_point_restricted(r, opponent, target_x, target_y) then ok = false end
+                local start_x, start_y_check = opponent.x, opponent.y
+                g:step_fixed(config.fixed_dt, g.commands)
+                if math.sqrt((opponent.x - start_x)^2 + (opponent.y - start_y_check)^2) > 8 then ok = false end
+                for _ = 1, 359 do g:step_fixed(config.fixed_dt, g.commands) end
+                if referee.is_point_restricted(r, opponent) then
+                    ok = false
+                    details = string.format("adversário preso em lado=%d, ponto=%.1f; alvo=(%.1f, %.1f), posição=(%.1f, %.1f), v=(%.1f, %.1f)",
+                        side_index, x, target_x, target_y, opponent.x, opponent.y, opponent.vx, opponent.vy)
+                end
+
+                taker.x, taker.y = x, (zone_top + zone_bottom) * 0.5
+                local allowed_x, allowed_y = referee.restriction_target(r, taker)
+                if allowed_x ~= taker.x or allowed_y ~= taker.y then ok = false end
+            end
+        end
+        assert_test("Lateral usa faixa retangular, empurra sem teleporte junto à parede, libera cobrador e limita a linha aos cantos",
+            ok, details)
+    end
+
+    do
+        local referee = require "src.referee"
         local g = game_mod.new(config, "1v1", 2)
         local r = g.referee
         referee.begin_play(r, nil)
