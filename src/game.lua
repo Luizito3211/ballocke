@@ -5,10 +5,12 @@ local field_mod = require "src.field"
 local player_mod = require "src.entities.player"
 local ball_mod = require "src.entities.ball"
 local input_mod = require "src.input"
+local camera_mod = require "src.camera"
 
 function game.new(config, preset_name, num_players)
     local g = {}
     g.config = config
+    g.is_training = true
 
     g.score_p1 = 0
     g.score_p2 = 0
@@ -39,6 +41,8 @@ function game.new(config, preset_name, num_players)
 
     setmetatable(g, { __index = game })
     g:set_mode(preset_name or config.default_mode or "2v2", num_players or #config.players)
+    g.camera = camera_mod.new(config.camera, g.field, config.camera.viewWidth,
+                              config.viewport.height, config.viewport.width)
 
     return g
 end
@@ -57,6 +61,7 @@ function game.set_mode(g, mode_name, num_players)
 
     -- 2. Bola no centro do campo
     g.ball = ball_mod.new(cfg, 0, 0)
+    g.ball.prev_x, g.ball.prev_y = g.ball.x, g.ball.y
 
     -- 3. Inicialização dos Jogadores e Comandos Pré-Alocados
     num_players = math.min(num_players or #cfg.players, #cfg.players, formation.capacity * 2)
@@ -83,6 +88,7 @@ function game.set_mode(g, mode_name, num_players)
         end
 
         g.players[i] = player_mod.new(p_data, cfg, spawn_x, spawn_y)
+        g.players[i].prev_x, g.players[i].prev_y = spawn_x, spawn_y
         g.commands[i] = { moveX = 0, moveY = 0, kick = false, spinX = 0, spinY = 0 }
     end
 
@@ -98,13 +104,16 @@ function game.set_mode(g, mode_name, num_players)
     g.num_player_pairs = pair_idx
 
     g:reset_positions()
+    if g.camera then g.camera.field = g.field; g.camera.initialized = false end
 end
 
 -- Reinicia posições para o início da jogada (kick-off)
 function game.reset_positions(g)
     g.ball:reset()
+    g.ball.prev_x, g.ball.prev_y = g.ball.x, g.ball.y
     for i = 1, #g.players do
         g.players[i]:reset()
+        g.players[i].prev_x, g.players[i].prev_y = g.players[i].x, g.players[i].y
     end
     g.is_goal_delay = false
     g.goal_delay_timer = 0
@@ -127,6 +136,10 @@ function game.step_fixed(g, dt, commands)
     local b = g.ball
     local players = g.players
     local num_p = #players
+    b.prev_x, b.prev_y = b.x, b.y
+    for i = 1, num_p do
+        players[i].prev_x, players[i].prev_y = players[i].x, players[i].y
+    end
     commands = commands or g.commands
 
     -- 1. Tratamento do intervalo após gol
@@ -299,7 +312,8 @@ function game.update_presentation(g)
     end
 end
 
-function game.draw(g, show_colliders)
+function game.draw(g, show_colliders, alpha)
+    alpha = alpha or 1
     local colors = g.config.colors
     local cfg = g.config
 
@@ -325,11 +339,13 @@ function game.draw(g, show_colliders)
 
     -- 3. Jogadores
     for i = 1, #g.players do
-        g.players[i]:draw(colors)
+        local p = g.players[i]
+        p:draw(colors, p.prev_x + (p.x - p.prev_x) * alpha, p.prev_y + (p.y - p.prev_y) * alpha)
     end
 
     -- 4. Bola
-    g.ball:draw(colors)
+    g.ball:draw(colors, g.ball.prev_x + (g.ball.x - g.ball.prev_x) * alpha,
+                g.ball.prev_y + (g.ball.y - g.ball.prev_y) * alpha)
 end
 
 return game

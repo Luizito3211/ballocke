@@ -1,6 +1,6 @@
 # HaxBall Local
 
-Jogo de futebol 2D local para até quatro pessoas no mesmo teclado, feito em Lua com LÖVE 11.5. A partida acontece em um único computador. O projeto não implementa jogo online nem partidas em rede local.
+Jogo de futebol 2D local para até quatro pessoas no mesmo teclado, feito em Lua com LÖVE 11.5. A partida acontece em um único computador. O projeto ainda não implementa jogo online nem partidas em rede local.
 
 ## Como jogar
 
@@ -14,7 +14,7 @@ Abra o jogo e use os controles abaixo. `F2` percorre os modos 1v1, 2v2, 3v3, 4v4
 | Direita | D | Seta para a direita | L | Numpad 6 ou 6 |
 | Chutar | Espaço | Shift direito | U | Numpad 0 ou 0 |
 
-O campo RS mede 3000 × 1500 unidades, com paredes externas de contenção 150 unidades além das linhas. O mundo usa (0, 0) no centro da quadra. A janela mostra provisoriamente a arena inteira; a câmera RS será implementada na Fase 2. `F4` mostra/oculta os colisores reais (paredes externas em vermelho, traves em amarelo e redes em ciano); `F3` mostra/oculta o diagnóstico e `F11` alterna janela e tela cheia.
+A quadra RS mede 3000 x 1500 unidades; o mundo usa (0, 0) no centro. A câmera acompanha o jogador e a bola com viewWidth inicial de 1500. Use + e - para ajustar o zoom, F5 para abrir o painel de calibração (somente no jogo local) e F4 para ver os colisores. F3 alterna o diagnóstico e F11 alterna janela e tela cheia.
 
 O mouse posiciona o ponto de contato no seletor de efeito no canto inferior direito. Clique em `[C]` ou pressione `C` para centralizá-lo.
 

@@ -3,6 +3,8 @@ local physics = require "src.physics"
 local config = require "src.config"
 local field_mod = require "src.field"
 local game_mod = require "src.game"
+local camera_mod = require "src.camera"
+local calibration_mod = require "src.calibration"
 
 local tests = {}
 
@@ -39,6 +41,92 @@ function tests.run()
 
     local f = field_mod.new(config.field)
 
+    do
+        local cc = config.camera
+        local view_h = cc.viewWidth * config.viewport.height / config.viewport.width
+        local ok, min_margin = true, 1
+        local function check_camera(px, py, tx, ty)
+            local cx, cy = camera_mod.solve(tx, ty, px, py, cc.viewWidth, view_h,
+                f, cc.cameraPadding, cc.edgeMarginFraction, config.player.radius, cc.safeZoneFraction)
+            local nx = (px - (cx - cc.viewWidth * 0.5)) / cc.viewWidth
+            local ny = (py - (cy - view_h * 0.5)) / view_h
+            local margin_x = math.min(nx, 1 - nx)
+            local margin_y = math.min(ny, 1 - ny) * view_h / cc.viewWidth
+            local body_margin_x = margin_x - config.player.radius / cc.viewWidth
+            local body_margin_y = margin_y - config.player.radius / cc.viewWidth
+            if body_margin_x < cc.edgeMarginFraction - 0.0001 or body_margin_y < cc.edgeMarginFraction - 0.0001 then ok = false end
+            if cx - cc.viewWidth * 0.5 < f.outer_left - cc.cameraPadding - 0.001 or
+               cx + cc.viewWidth * 0.5 > f.outer_right + cc.cameraPadding + 0.001 or
+               cy - view_h * 0.5 < f.outer_top - cc.cameraPadding - 0.001 or
+               cy + view_h * 0.5 > f.outer_bottom + cc.cameraPadding + 0.001 then ok = false end
+            min_margin = math.min(min_margin, body_margin_x, body_margin_y)
+        end
+        local edge = config.player.radius
+        check_camera(f.outer_left + edge, f.outer_top + edge, f.right, f.bottom)
+        check_camera(f.outer_right - edge, f.outer_top + edge, f.left, f.bottom)
+        check_camera(f.outer_left + edge, f.outer_bottom - edge, f.right, f.top)
+        check_camera(f.outer_right - edge, f.outer_bottom - edge, f.left, f.top)
+        for i = 1, 4 do
+            local wall = f.outer_walls[i]
+            for j = -10, 10 do
+                local t = (j + 10) / 20
+                check_camera(wall.x1 + (wall.x2 - wall.x1) * t + wall.nx * edge,
+                    wall.y1 + (wall.y2 - wall.y1) * t + wall.ny * edge, 0, 0)
+            end
+        end
+        local seed = 8675309
+        for i = 1, 2500 do
+            seed = (seed * 48271) % 2147483647
+            local px = f.outer_left + edge + (seed / 2147483647) * (f.outer_width - edge * 2)
+            seed = (seed * 48271) % 2147483647
+            local py = f.outer_top + edge + (seed / 2147483647) * (f.outer_height - edge * 2)
+            seed = (seed * 48271) % 2147483647
+            local tx = f.outer_left + (seed / 2147483647) * f.outer_width
+            seed = (seed * 48271) % 2147483647
+            local ty = f.outer_top + (seed / 2147483647) * f.outer_height
+            check_camera(px, py, tx, ty)
+        end
+        assert_test("Câmera mantém disco do jogador a 5% da borda: cantos, paredes e entradas aleatórias",
+                    ok, string.format("menor margem equivalente=%.4f da largura", min_margin))
+    end
+
+    do
+        local g = game_mod.new(config, "1v1", 2)
+        local before_accel, before_kick = config.player.acceleration, config.player.kick_strength
+        local cal = calibration_mod.new(config, g, true)
+        local default_time, default_distance, default_percent, default_ratio, default_speed = calibration_mod.metrics(cal)
+        io.write(string.format("       Fisica padrao: travessia %.2f s; chute %.0f unidades (%.1f%%); razao %.2f; velocidade sustentada %.1f u/s\n",
+            default_time, default_distance, default_percent, default_ratio, default_speed))
+        cal.accelerationFactor, cal.kickFactor = 1.5, 1.25
+        cal.ballDamping, cal.playerDamping = 0.98, 0.94
+        cal.viewWidth, cal.cameraWeight = 1700, 0.7
+        cal:apply()
+        local t, d, pct, ratio = calibration_mod.metrics(cal)
+        local values_ok = g.players[1].acceleration == before_accel * 1.5 and
+            g.players[1].kick_strength == before_kick * 1.25 and g.ball.damping == 0.98 and
+            g.camera.viewWidth == 1700 and g.camera.weight == 0.7 and t > 0 and d > 0 and pct > 0 and ratio > 1
+        cal:apply()
+        assert_test("Painel de calibração altera instâncias sem mudar padrões globais da física", values_ok and
+            config.player.acceleration == before_accel and config.player.kick_strength == before_kick)
+    end
+
+    do
+        local scale1280 = config.viewport.width / config.camera.viewWidth
+        local scale1920 = 1920 / config.camera.viewWidth
+        local sustained_speed = math.min(config.player.max_speed,
+            config.player.acceleration * config.fixed_dt * config.player.damping / (1 - config.player.damping))
+        assert_test("Escala da câmera produz diâmetros e velocidade de tela esperados",
+            math.abs(config.player.radius * 2 * scale1280 - 25.6) < 0.001 and
+            math.abs(config.ball.radius * 2 * scale1280 - 17.0667) < 0.001 and
+            math.abs(config.player.radius * 2 * scale1920 - 38.4) < 0.001 and
+            math.abs(config.ball.radius * 2 * scale1920 - 25.6) < 0.001 and
+            math.abs(sustained_speed * scale1280 - 153.6) < 0.01)
+        io.write(string.format("       viewWidth %.0f: jogador/bola %.2f/%.2f px (1280x720), %.2f/%.2f px (1920x1080); jogador %.1f px/s\n",
+            config.camera.viewWidth, config.player.radius * 2 * scale1280,
+            config.ball.radius * 2 * scale1280, config.player.radius * 2 * scale1920,
+            config.ball.radius * 2 * scale1920, sustained_speed * scale1280))
+    end
+
     -- Origem central e limites simétricos em pontos do mundo.
     do
         local centered = f.cx == 0 and f.cy == 0 and
@@ -64,21 +152,6 @@ function tests.run()
             f.goal_back_left == -1620 and f.goal_back_right == 1620 and
             config.player.radius == 15 and config.ball.radius == 10
         assert_test("Geometria de gols, traves, paredes e escala de entidades", geometry_ok)
-    end
-
-    do
-        local padding = config.viewport.world_padding
-        local world_w = f.outer_width + padding * 2
-        local world_h = f.outer_height + padding * 2
-        local available_w = config.viewport.width - config.viewport.world_left_reserved - config.viewport.world_right_reserved
-        local available_h = config.viewport.height - config.viewport.world_top_reserved - config.viewport.world_bottom_reserved
-        local scale = math.min(available_w / world_w, available_h / world_h)
-        local player_diameter = config.player.radius * 2 * scale
-        local ball_diameter = config.ball.radius * 2 * scale
-        local fits = world_w * scale <= available_w and world_h * scale <= available_h
-        assert_test("Enquadramento provisório contém a arena inteira", fits)
-        io.write(string.format("       Diâmetros no viewport 1280x720: jogador %.2f px, bola %.2f px\n",
-                              player_diameter, ball_diameter))
     end
 
     -- Todas as quadras têm a mesma geometria; cada modo declara sua capacidade.

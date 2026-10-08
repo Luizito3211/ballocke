@@ -184,4 +184,15 @@ function ui.draw_debug(u, dt, show_debug, game_state)
     love.graphics.draw(u.text_debug, 18, 14)
 end
 
+function ui.draw_ball_arrow(u, x, y, dx, dy)
+    local length = math.sqrt(dx * dx + dy * dy)
+    if length < 0.001 then return end
+    dx, dy = dx / length, dy / length
+    local px, py = -dy, dx
+    love.graphics.setColor(1, 0.88, 0.22, 0.95)
+    love.graphics.polygon("fill", x + dx * 12, y + dy * 12,
+        x - dx * 8 + px * 7, y - dy * 8 + py * 7,
+        x - dx * 8 - px * 7, y - dy * 8 - py * 7)
+end
+
 return ui

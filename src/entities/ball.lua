@@ -37,31 +37,32 @@ function ball.step_physics(b, dt, physics, spin_config)
     physics.integrate(b, dt)
 end
 
-function ball.draw(b, colors)
+function ball.draw(b, colors, x, y)
+    x, y = x or b.x, y or b.y
     -- Sombra sutil da bola
     love.graphics.setColor(0, 0, 0, 0.25)
-    love.graphics.circle("fill", b.x + 1.5, b.y + 1.5, b.radius)
+    love.graphics.circle("fill", x + 1.5, y + 1.5, b.radius)
 
     -- Corpo da bola
     love.graphics.setColor(colors.ball)
-    love.graphics.circle("fill", b.x, b.y, b.radius)
+    love.graphics.circle("fill", x, y, b.radius)
 
     -- Borda escura
     love.graphics.setColor(colors.ball_outline)
     love.graphics.setLineWidth(1.5)
-    love.graphics.circle("line", b.x, b.y, b.radius)
+    love.graphics.circle("line", x, y, b.radius)
 
     -- Efeito visual do spin na bola (marcador sutil indicando a rotação ativa)
     if b.spin_x and b.spin_y and (math.abs(b.spin_x) > 0.05 or math.abs(b.spin_y) > 0.05) then
         love.graphics.setColor(0.9, 0.3, 0.3, 0.8)
-        local dot_x = b.x + b.spin_x * (b.radius * 0.5)
-        local dot_y = b.y - b.spin_y * (b.radius * 0.5)
+        local dot_x = x + b.spin_x * (b.radius * 0.5)
+        local dot_y = y - b.spin_y * (b.radius * 0.5)
         love.graphics.circle("fill", dot_x, dot_y, 2.5)
     end
 
     -- Ponto de luz interno procedural (efeito 3D suave)
     love.graphics.setColor(1, 1, 1, 0.7)
-    love.graphics.circle("fill", b.x - b.radius * 0.3, b.y - b.radius * 0.3, b.radius * 0.25)
+    love.graphics.circle("fill", x - b.radius * 0.3, y - b.radius * 0.3, b.radius * 0.25)
 end
 
 return ball

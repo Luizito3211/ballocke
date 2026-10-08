@@ -88,32 +88,33 @@ function player.step_physics(p, dt, move_x, move_y, kick_pressed, spin_x, spin_y
     end
 end
 
-function player.draw(p, colors)
+function player.draw(p, colors, x, y)
+    x, y = x or p.x, y or p.y
     -- Sombra
     love.graphics.setColor(0, 0, 0, 0.28)
-    love.graphics.circle("fill", p.x + 2, p.y + 2, p.radius)
+    love.graphics.circle("fill", x + 2, y + 2, p.radius)
 
     -- Glow/anel branco quando estiver chutando
     if p.is_kicking then
         love.graphics.setColor(colors.kicking_glow)
-        love.graphics.circle("fill", p.x, p.y, p.radius + 3)
+        love.graphics.circle("fill", x, y, p.radius + 3)
     end
 
     -- Disco externo principal
     love.graphics.setColor(p.color)
-    love.graphics.circle("fill", p.x, p.y, p.radius)
+    love.graphics.circle("fill", x, y, p.radius)
 
     -- Contorno escuro
     love.graphics.setColor(0.1, 0.1, 0.1, 0.9)
     love.graphics.setLineWidth(2)
-    love.graphics.circle("line", p.x, p.y, p.radius)
+    love.graphics.circle("line", x, y, p.radius)
 
     -- Círculo interno (estilo HaxBall)
     love.graphics.setColor(p.inner_color)
-    love.graphics.circle("fill", p.x, p.y, p.radius * 0.45)
+    love.graphics.circle("fill", x, y, p.radius * 0.45)
     love.graphics.setColor(0, 0, 0, 0.4)
     love.graphics.setLineWidth(1)
-    love.graphics.circle("line", p.x, p.y, p.radius * 0.45)
+    love.graphics.circle("line", x, y, p.radius * 0.45)
 end
 
 return player
