@@ -5,6 +5,7 @@ local field_mod = require "src.field"
 local game_mod = require "src.game"
 local camera_mod = require "src.camera"
 local calibration_mod = require "src.calibration"
+local preferences_mod = require "src.preferences"
 
 local tests = {}
 
@@ -40,6 +41,41 @@ function tests.run()
     end
 
     local f = field_mod.new(config.field)
+
+    do
+        local default = config.camera.viewWidth
+        local function fake_filesystem(present, contents, second_result)
+            return {
+                getInfo = function() return present and { type = "file" } or nil, "missing" end,
+                read = function() return contents, second_result or "metadata" end,
+            }
+        end
+        local scenarios = {
+            { "saves vazios", fake_filesystem(false), default },
+            { "arquivo vazio", fake_filesystem(true, ""), default },
+            { "arquivo corrompido", fake_filesystem(true, "zoom=perto"), default },
+            { "zoom abaixo do mínimo", fake_filesystem(true, "1"), config.camera.viewWidthMin },
+            { "zoom acima do máximo", fake_filesystem(true, "999999999"), config.camera.viewWidthMax },
+            { "zoom válido", fake_filesystem(true, "1750"), 1750 },
+        }
+        local loaded_all = true
+        for i = 1, #scenarios do
+            local scenario = scenarios[i]
+            local fake = scenario[2]
+            local initialized = love.initialize_game({ getInfo = fake.getInfo, read = fake.read })
+            if not initialized or initialized.camera.viewWidth ~= scenario[3] then loaded_all = false end
+            io.write(string.format("       Inicialização: %s -> zoom %.0f\n", scenario[1],
+                initialized and initialized.camera.viewWidth or -1))
+        end
+        config.camera.viewWidth = default
+        local corrupt_read = {
+            getInfo = function() return { type = "file" } end,
+            read = function() error("arquivo indisponível") end,
+        }
+        local read_error_defaulted = preferences_mod.read_view_width(config, corrupt_read) == default
+        assert_test("love.load inicializa com save vazio/corrompido, limita valores e restaura zoom válido",
+                    loaded_all and read_error_defaulted)
+    end
 
     do
         local cc = config.camera
@@ -160,7 +196,7 @@ function tests.run()
         for i = 1, #config.mode_names do
             local mode = config.mode_names[i]
             local g = game_mod.new(config, mode, #config.players)
-            local capacity = tonumber(string.sub(mode, 1, 1))
+            local capacity = tonumber((string.sub(mode, 1, 1)))
             local expected_players = math.min(4, capacity * 2)
             if g.team_capacity ~= capacity or #g.players ~= expected_players or
                g.field.outer_width ~= f.outer_width or g.field.outer_height ~= f.outer_height then

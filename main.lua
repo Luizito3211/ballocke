@@ -5,6 +5,7 @@ local ui_mod = require "src.ui"
 local input_mod = require "src.input"
 local camera_mod = require "src.camera"
 local calibration_mod = require "src.calibration"
+local preferences = require "src.preferences"
 
 local game_inst
 local ui_inst
@@ -19,6 +20,16 @@ local show_colliders = false
 local last_dt = 0.016
 local spin_keyboard_enabled = false
 local mouse_just_pressed = false
+
+function love.initialize_game(filesystem)
+    config.camera.viewWidth = preferences.read_view_width(config, filesystem)
+    game_inst = game_mod.new(config, config.default_mode, #config.players)
+    ui_inst = ui_mod.new(config)
+    calibration_inst = calibration_mod.new(config, game_inst)
+    ui_inst:update_score(game_inst.score_p1, game_inst.score_p2)
+    love.resize(love.graphics.getDimensions())
+    return game_inst
+end
 
 function love.load(arg)
     pcall(function() io.stdout:setvbuf("no") end)
@@ -41,16 +52,7 @@ function love.load(arg)
     spin_keyboard_enabled = (config.spin_selector and config.spin_selector.local_keyboard_enabled) or false
 
     -- Inicialização do jogo e interface
-    game_inst = game_mod.new(config, config.default_mode, #config.players)
-    ui_inst = ui_mod.new(config)
-    local saved_width = tonumber(love.filesystem.read("view_width.txt"))
-    if saved_width then config.camera.viewWidth = math.max(config.camera.viewWidthMin, math.min(config.camera.viewWidthMax, saved_width)) end
-    game_inst.camera.viewWidth = config.camera.viewWidth
-    game_inst.camera.viewHeight = config.camera.viewWidth * config.viewport.height / config.viewport.width
-    calibration_inst = calibration_mod.new(config, game_inst)
-    ui_inst:update_score(game_inst.score_p1, game_inst.score_p2)
-
-    love.resize(love.graphics.getDimensions())
+    love.initialize_game()
 end
 
 function love.resize(w, h)

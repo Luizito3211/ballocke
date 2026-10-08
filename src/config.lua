@@ -86,7 +86,8 @@ config.spin_selector = {
 config.trajectory = { max_ticks = 120, max_bounces = 2, step_stride = 2 }
 config.game = { goal_reset_delay = 2.0 }
 config.camera = {
-    viewWidth = 1500, viewWidthMin = 1100, viewWidthMax = 1900, viewWidthStep = 50,
+    viewWidth = 1500, viewWidthDefault = 1500,
+    viewWidthMin = 1100, viewWidthMax = 1900, viewWidthStep = 50,
     weight = 0.5, weightStep = 0.05, damping = 8.0, safeZoneFraction = 0.70,
     edgeMarginFraction = 0.05, cameraPadding = 100, showBallArrow = true,
 }
