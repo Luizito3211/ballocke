@@ -102,7 +102,8 @@ function ui.draw_test_panel(u, virtual_width, virtual_height)
         love.graphics.draw(u.test_rows[i], virtual_width / 2 - 300, virtual_height / 2 - 145 + (i - 1) * 32)
     end
     love.graphics.setColor(0.75, 0.8, 0.85, 1)
-    love.graphics.printf(u.text_test_help, virtual_width / 2 - 320, virtual_height / 2 + 145, 640, "center")
+    love.graphics.draw(u.text_test_help,
+        virtual_width / 2 - u.text_test_help:getWidth() / 2, virtual_height / 2 + 145)
 end
 
 -- Atualiza o texto do placar SOMENTE quando houver alteração de pontos

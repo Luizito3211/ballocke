@@ -38,14 +38,26 @@ local function set_test_half(r, one_minute)
     r.regulationExpired, r.graceRemaining = false, config.referee.regulationGrace
 end
 
-function love.initialize_game(filesystem)
+function love.initialize_game(filesystem, num_players, game_config)
+    local active_config = game_config or config
     config.camera.viewWidth = preferences.read_view_width(config, filesystem)
-    game_inst = game_mod.new(config, config.default_mode, #config.players)
-    ui_inst = ui_mod.new(config)
-    calibration_inst = calibration_mod.new(config, game_inst)
+    local mode = num_players == 1 and "1v1" or (num_players == 10 and "5v5" or active_config.default_mode)
+    game_inst = game_mod.new(active_config, mode, num_players or #active_config.players)
+    game_inst.is_training = true
+    ui_inst = ui_mod.new(active_config)
+    calibration_inst = calibration_mod.new(active_config, game_inst)
     ui_inst:update_score(game_inst.score_p1, game_inst.score_p2)
+    ui_inst:update_referee(game_inst.referee)
     love.resize(love.graphics.getDimensions())
     return game_inst
+end
+
+-- Harness usado somente por --test para renderizar overlays sem alterar o jogo normal.
+function love.configure_smoke_overlays(enabled)
+    show_debug = enabled
+    show_colliders = enabled
+    if calibration_inst then calibration_inst.open = enabled end
+    referee_panel_open = enabled
 end
 
 function love.load(arg)
@@ -56,8 +68,8 @@ function love.load(arg)
         for i = 1, #arg do
             if arg[i] == "--test" then
                 local test_mod = require "tests.test_physics"
-                local ok, all_passed = pcall(test_mod.run)
-                if not ok then io.stderr:write("ERRO NO TESTE: ", tostring(all_passed), "\n") end
+                local ok, all_passed = xpcall(test_mod.run, debug.traceback)
+                if not ok then io.stderr:write("ERRO NO TESTE:\n", tostring(all_passed), "\n") end
                 all_passed = ok and all_passed == true
                 io.flush()
                 os.exit(all_passed and 0 or 1)
@@ -176,7 +188,7 @@ function love.draw()
 
     -- Desenha HUD, placar e seletor de efeito
     ui_inst:draw_hud(game_inst, config.colors, vw, vh)
-    ui_inst:draw_referee(game_inst.referee, vw)
+    ui_inst:draw_referee(vw)
 
     -- Overlay de debug (F3)
     ui_inst:draw_debug(last_dt, show_debug, game_inst)

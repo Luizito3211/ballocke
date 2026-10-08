@@ -625,6 +625,89 @@ function tests.run()
             string.format("estado=%s, tempo=%d ticks", r.state, ticks))
     end
 
+    do
+        local referee = require "src.referee"
+        local smoke_call_ok, smoke_ok, smoke_result = xpcall(function()
+            local empty_saves = {
+                getInfo = function() return nil, "save inexistente" end,
+                read = function() return nil, "save inexistente" end,
+            }
+            local state_names = {
+                referee.STATE_WARMUP, referee.STATE_KICKOFF, referee.STATE_PLAY,
+                referee.STATE_LATERAL, referee.STATE_GOAL_KICK, referee.STATE_CORNER,
+                referee.STATE_GOAL, referee.STATE_INTERVAL, referee.STATE_FINISHED,
+            }
+            local resolutions = { {1280, 720}, {1920, 1080} }
+            local player_counts = { 1, 10 }
+            local completed = 0
+            for count_index = 1, #player_counts do
+                local player_count = player_counts[count_index]
+                local smoke_config = {}
+                for key, value in pairs(config) do smoke_config[key] = value end
+                smoke_config.players = {}
+                for i = 1, player_count do
+                    local source = config.players[(i - 1) % #config.players + 1]
+                    smoke_config.players[i] = {
+                        id = "smoke" .. i, name = source.name, team = i <= player_count / 2 and "red" or "blue",
+                        number = source.number, color = source.color, inner_color = source.inner_color,
+                        keys = source.keys, spin_keys = source.spin_keys,
+                    }
+                end
+                local active_game = love.initialize_game(empty_saves, player_count, smoke_config)
+                love.configure_smoke_overlays(true)
+                for resolution_index = 1, #resolutions do
+                    local width, height = resolutions[resolution_index][1], resolutions[resolution_index][2]
+                    local canvas = love.graphics.newCanvas(width, height)
+                    love.resize(width, height)
+                    love.graphics.setCanvas(canvas)
+                    for state_index = 1, #state_names do
+                        local state = state_names[state_index]
+                        local r, f = active_game.referee, active_game.field
+                        if state == referee.STATE_WARMUP then
+                            referee.reset_match(r)
+                        elseif state == referee.STATE_KICKOFF then
+                            referee.begin_restart(r, "kickoff", "red", 0, 0)
+                        elseif state == referee.STATE_PLAY then
+                            referee.begin_play(r, nil)
+                        elseif state == referee.STATE_LATERAL then
+                            referee.begin_restart(r, "lateral", "blue", 0, f.top)
+                        elseif state == referee.STATE_GOAL_KICK then
+                            referee.begin_restart(r, "goal_kick", "blue", f.left + config.field.goal_area_depth / 2, 0)
+                        elseif state == referee.STATE_CORNER then
+                            referee.begin_restart(r, "corner", "red", f.right, f.bottom)
+                        elseif state == referee.STATE_GOAL then
+                            referee.begin_goal(r, "red")
+                            active_game.is_goal_delay, active_game.last_scorer = true, "p1"
+                        elseif state == referee.STATE_INTERVAL then
+                            r.half = 1
+                            referee.end_period(r)
+                        else
+                            r.half = 2
+                            referee.end_period(r)
+                        end
+                        for frame = 1, 300 do
+                            local frame_ok, frame_error = xpcall(function()
+                                love.update(config.fixed_dt)
+                                love.draw()
+                            end, debug.traceback)
+                            if not frame_ok then
+                                error(string.format("Fumaça: jogadores=%d, resolução=%dx%d, estado=%s, quadro=%d\n%s",
+                                    player_count, width, height, state, frame, tostring(frame_error)), 0)
+                            end
+                        end
+                        completed = completed + 1
+                    end
+                    love.graphics.setCanvas()
+                    canvas:release()
+                end
+            end
+            love.configure_smoke_overlays(false)
+            return completed == 36, completed
+        end, debug.traceback)
+        assert_test("Fumaça update/draw: 9 estados × 1/10 jogadores × 1280/1920, 300 quadros e F3/F4/F5/F6",
+            smoke_call_ok and smoke_ok, smoke_call_ok and (tostring(smoke_result) .. " cenários") or smoke_ok)
+    end
+
 
     io.write("\n=======================================================\n")
     io.write(string.format("RESULTADO FINAL: %d / %d TESTES APROVADOS\n", passed, total))
