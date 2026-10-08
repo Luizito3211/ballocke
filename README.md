@@ -36,4 +36,4 @@ O jogo pronto será publicado na página de Releases do GitHub. **Link da versã
 
 ## Gerar o build portátil
 
-No Windows, execute `build.bat` na raiz do projeto. O pacote final será gerado em `dist/HaxBallLocal.zip`. Consulte as instruções de publicação em `PUBLISHING.md` quando estiverem disponíveis.
+No Windows, execute `build.bat` na raiz do projeto. O script baixa o LÖVE 11.5 portátil oficial de 64 bits para `tools/` se necessário e gera `dist/HaxBallLocal.zip`, sem instalar componentes no sistema. O arquivo inclui o runtime e a licença do LÖVE. Saves futuros devem usar `love.filesystem`; no momento, o jogo não grava saves nem configurações persistentes. Consulte `PUBLISHING.md` quando as instruções de publicação estiverem disponíveis.
