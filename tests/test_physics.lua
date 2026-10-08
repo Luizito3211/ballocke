@@ -507,7 +507,7 @@ function tests.run()
         local kind, scoring = referee.detect_exit(r, b, f)
         local goal_ok = kind == "goal" and scoring == "red"
         referee.begin_goal(r, scoring)
-        referee.clock_tick(r, config.referee.goalPause + 0.01)
+        referee.clock_tick(r, config.game.goalCelebrationSeconds + 0.01)
         goal_ok = goal_ok and r.state == referee.STATE_KICKOFF and r.restartTeam == "blue" and r.ballFrozen
         referee.begin_restart(r, "lateral", "red", 0, f.top)
         local stopped_x, stopped_y = b.x, b.y
@@ -582,10 +582,10 @@ function tests.run()
         local opponent = g.players[2]
         local other_touch_ok = not referee.note_touch(r, opponent) and not r.noRetouch
         referee.begin_restart(r, "lateral", "red", 0, g.field.top)
-        local timings = config.referee.restartTimeouts.lateral == 20 and
-            config.referee.restartTimeouts.goal_kick == 20 and
-            config.referee.restartTimeouts.corner == 25 and
-            config.referee.restartTimeouts.kickoff == 25 and
+        local timings = config.referee.restartTimeouts.lateral == 0 and
+            config.referee.restartTimeouts.goal_kick == 0 and
+            config.referee.restartTimeouts.corner == 0 and
+            config.referee.restartTimeouts.kickoff == 0 and
             config.game.halfDuration == 300 and config.game.testHalfDuration == 60
         assert_test("Toque duplo, toque de outro jogador e tempos padrão/teste", kicker_cannot_retouch and other_touch_ok and timings)
     end
@@ -610,7 +610,7 @@ function tests.run()
                 local x1, x2, line_y, zone_top, zone_bottom = referee.throw_in_geometry(r)
                 local expected_line = side_index == 1 and field.top + config.referee.throwInLineOffset or
                     field.bottom - config.referee.throwInLineOffset
-                if x1 < field.left or x2 > field.right or x2 - x1 > config.referee.throwInLineLength or
+                if x1 ~= field.outer_left or x2 ~= field.outer_right or
                    math.abs(line_y - expected_line) > 0.001 or zone_top >= zone_bottom then ok = false end
 
                 local taker, opponent = g.players[1], g.players[2]
@@ -636,7 +636,7 @@ function tests.run()
                 if allowed_x ~= taker.x or allowed_y ~= taker.y then ok = false end
             end
         end
-        assert_test("Lateral usa faixa retangular, empurra sem teleporte junto à parede, libera cobrador e limita a linha aos cantos",
+        assert_test("Lateral usa barreira retangular parede a parede, deslocamento suave e cobrador liberado",
             ok, details)
     end
 
@@ -673,6 +673,173 @@ function tests.run()
         local full_match = r.state == referee.STATE_FINISHED and r.half == 2 and not r.redAttacksRight and ticks < 12000
         assert_test("Partida simulada completa: dois tempos, intervalo, troca de lado e fim sem travar", full_match,
             string.format("estado=%s, tempo=%d ticks", r.state, ticks))
+    end
+
+    do
+        local referee = require "src.referee"
+        local g = game_mod.new(config, "1v1", 2)
+        local r, b = g.referee, g.ball
+        referee.begin_restart(r, "lateral", "red", 0, g.field.top)
+        r.halfDuration, r.halfRemaining = 1200, 1200
+        local frozen_x, frozen_y = b.x, b.y
+        for _ = 1, 600 * 60 do g:step_fixed(config.fixed_dt, g.commands) end
+        assert_test("Timeout zero mantém bola parada congelada por 10 minutos simulados",
+            r.state == referee.STATE_LATERAL and r.ballFrozen and b.x == frozen_x and b.y == frozen_y)
+    end
+
+    do
+        local referee = require "src.referee"
+        local kinds = { "lateral", "corner", "goal_kick", "kickoff" }
+        local all_blocked, all_evacuated, authorized = true, true, true
+        local barrier_details = ""
+        for i = 1, #kinds do
+            local g = game_mod.new(config, "2v2", 4)
+            local r, f, enemy = g.referee, g.field, g.players[4]
+            local x, y
+            if kinds[i] == "lateral" then x, y = 0, f.top
+            elseif kinds[i] == "corner" then x, y = f.left, f.top
+            elseif kinds[i] == "goal_kick" then x, y = f.left + 100, 0
+            else x, y = 0, 0 end
+            referee.begin_restart(r, kinds[i], "red", x, y)
+            if kinds[i] == "lateral" then enemy.x, enemy.y = 0, f.outer_top + enemy.radius + 1
+            elseif kinds[i] == "corner" then enemy.x, enemy.y = f.left + 10, f.top + 10
+            elseif kinds[i] == "goal_kick" then enemy.x, enemy.y = f.left + 100, 0
+            else enemy.x, enemy.y = 0, 0 end
+            enemy.prev_x, enemy.prev_y = enemy.x, enemy.y
+            for _ = 1, 300 do g:step_fixed(config.fixed_dt, g.commands) end
+            if referee.is_point_restricted(r, enemy) then all_evacuated = false; barrier_details = barrier_details .. kinds[i] .. " não evacuou; " end
+            local start_x, start_y = enemy.x, enemy.y
+            local dir_x, dir_y = 0, 0
+            if kinds[i] == "lateral" then dir_y = r.restartY < 0 and -1 or 1
+            elseif kinds[i] == "corner" then dir_x, dir_y = (x < 0 and -1 or 1), (y < 0 and -1 or 1)
+            elseif kinds[i] == "goal_kick" then dir_x = x < 0 and -1 or 1
+            else dir_x = r.restartTeam == "red" and 1 or -1 end
+            if kinds[i] == "corner" then
+                local dx, dy = x - enemy.x, y - enemy.y
+                local length = math.sqrt(dx * dx + dy * dy)
+                dir_x, dir_y = dx / length, dy / length
+            end
+            g.commands[4].moveX, g.commands[4].moveY = dir_x, dir_y
+            for _ = 1, 120 do
+                g:step_fixed(config.fixed_dt, g.commands)
+                if referee.is_point_restricted(r, enemy) then all_blocked = false; barrier_details = barrier_details .. kinds[i] .. " atravessou; " end
+            end
+            g.commands[4].moveX, g.commands[4].moveY = 0, 0
+            local taker = g.players[1]
+            if referee.is_point_restricted(r, taker, r.restartX, r.restartY) then authorized = false end
+        end
+        assert_test("Barreiras sólidas bloqueiam velocidade máxima, evacuam sem travar e liberam cobrador",
+            all_blocked and all_evacuated and authorized,
+            barrier_details .. "bloqueado=" .. tostring(all_blocked) .. ", evacuado=" .. tostring(all_evacuated) .. ", cobrador=" .. tostring(authorized))
+    end
+
+    do
+        local referee = require "src.referee"
+        local g = game_mod.new(config, "2v2", 4)
+        local r, f = g.referee, g.field
+        local enemy, teammate = g.players[4], g.players[3]
+        referee.begin_restart(r, "lateral", "red", 400, f.top)
+        enemy.x, enemy.y, enemy.vx, enemy.vy = 400, f.top + config.referee.throwInLineOffset + enemy.radius + 1, 0, 0
+        teammate.x, teammate.y, teammate.vx, teammate.vy = enemy.x, enemy.y + 36, 0, -teammate.max_speed
+        local held = true
+        for _ = 1, 90 do
+            g:step_fixed(config.fixed_dt, g.commands)
+            if referee.is_point_restricted(r, enemy) then held = false end
+        end
+        assert_test("Barreira de lateral bloqueia adversário empurrado por colega", held)
+    end
+
+    do
+        local EventLog = require "src.event_log"
+        local saved = ""
+        local fake_fs = {
+            getInfo = function() return nil end,
+            write = function(_, contents) saved = contents; return true end,
+        }
+        local logger = EventLog.new(fake_fs, { path = "arbitro.log", capacity = 2000, flushInterval = 3 })
+        for i = 1, 2005 do logger:record(i, 1, 300, "ESTADO", "JOGO", "LATERAL", "motivo " .. i, i, -i) end
+        logger:flush()
+        local lines, count = 0, 0
+        for line in saved:gmatch("[^\r\n]+") do lines = lines + 1; if lines == 1 and line:find("motivo 6", 1, true) then count = count + 1 end end
+        assert_test("arbitro.log conserva só as 2000 linhas mais recentes e descarrega em lote", lines == 2000 and count == 1)
+    end
+
+    do
+        local referee = require "src.referee"
+        local g = game_mod.new(config, "1v1", 2)
+        local r = g.referee
+        local logged = 0
+        referee.attach_event_log(r, { record = function() logged = logged + 1 end })
+        referee.begin_goal(r, "red")
+        g.is_goal_delay, g.players[1].vx = true, 120
+        local initial_x = g.players[1].x
+        local celebration_events = logged
+        for _ = 1, 100 do
+            g:step_fixed(config.fixed_dt, g.commands)
+        end
+        local moved_during_celebration = g.players[1].x ~= initial_x and not r.ballFrozen and
+            r.state == referee.STATE_GOAL and logged == celebration_events
+        for _ = 101, math.floor(config.game.goalCelebrationSeconds / config.fixed_dt) + 1 do
+            g:step_fixed(config.fixed_dt, g.commands)
+        end
+        local reset_after = r.state == referee.STATE_KICKOFF and r.ballFrozen and g.players[1].x == g.players[1].spawn_x
+        local active = moved_during_celebration and reset_after and logged == celebration_events + 3 and
+            g.score_p1 == 0 and g.score_p2 == 0
+        referee.begin_goal(r, "blue")
+        r.halfRemaining = config.fixed_dt
+        for _ = 1, math.floor(config.game.goalCelebrationSeconds / config.fixed_dt) + 1 do
+            g:step_fixed(config.fixed_dt, g.commands)
+        end
+        local ends_match = r.state == referee.STATE_INTERVAL and r.regulationExpired and
+            g.players[1].x == g.players[1].spawn_x
+        assert_test("Comemoração de 7 s mantém movimento sem eventos/gols duplicados, repõe tudo e encerra tempo expirado", active and ends_match)
+    end
+
+    do
+        local training = love.initialize_game({ getInfo = function() return nil end, read = function() return nil end })
+        local ok = training and #training.players == 2 and training.players[1].team == "red" and
+            training.players[2].team == "blue" and training.players[1].allow_spin and not training.players[2].allow_spin and
+            training.players[2].keys.kick == "return"
+        assert_test("Treino solo inicia exatamente dois jogadores: WASD vermelho e IJKL/Enter azul sem efeito",
+            ok)
+    end
+
+    do
+        local referee = require "src.referee"
+        local test_config = {}
+        for key, value in pairs(config) do test_config[key] = value end
+        test_config.game = {}
+        for key, value in pairs(config.game) do test_config.game[key] = value end
+        test_config.game.halfDuration = 600
+        test_config.referee = {}
+        for key, value in pairs(config.referee) do test_config.referee[key] = value end
+        test_config.referee.testRestartTimeout = 0.25
+        local g = game_mod.new(test_config, "1v1", 2)
+        local r = g.referee
+        r.halfDuration, r.halfRemaining, r.testShortRestarts = 600, 600, true
+        referee.begin_play(r, nil)
+        local seed, events, reasons_ok = 1234567, 0, true
+        local memory_log = { record = function(_, _, _, _, _, _, _, reason) events = events + 1; if not reason or reason == "" then reasons_ok = false end end }
+        referee.attach_event_log(r, memory_log)
+        local ticks = 0
+        while r.state ~= referee.STATE_FINISHED and ticks < 80000 do
+            for i = 1, #g.commands do
+                seed = (seed * 48271) % 2147483647
+                local cmd = g.commands[i]
+                cmd.moveX = seed % 3 - 1
+                seed = (seed * 48271) % 2147483647
+                cmd.moveY = seed % 3 - 1
+                seed = (seed * 48271) % 2147483647
+                cmd.kick = seed % 47 == 0
+            end
+            g:step_fixed(config.fixed_dt, g.commands)
+            ticks = ticks + 1
+        end
+        assert_test("Simulação aleatória de 20 minutos registra motivo em toda transição", r.state == referee.STATE_FINISHED and
+            r.matchElapsed >= 1200 and events > 0 and reasons_ok,
+            string.format("estado=%s; tempo=%.1f; eventos=%d", r.state, r.matchElapsed, events))
+        io.write(string.format("       Simulação longa: %.1f s de partida; %d registros; motivos presentes em todos.\n",
+            r.matchElapsed, events))
     end
 
     do

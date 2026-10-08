@@ -60,9 +60,32 @@ function referee.new(config, field, ball, players)
         restartKickerId = nil, noRetouch = false, restartKickerSeparated = false,
         testShortRestarts = false, testOneMinute = false,
         displayedSeconds = -1,
+        matchElapsed = 0, eventLog = nil, scoringTeam = nil,
+        barrierEvacuationLogged = false,
     }
     set_frozen_ball(ball, 0, 0)
     return r
+end
+
+local function record(r, kind, old_state, new_state, reason)
+    if r.eventLog then
+        r.eventLog:record(r.matchElapsed, r.half, r.halfRemaining, kind,
+            old_state, new_state, reason, r.ball.x, r.ball.y)
+    end
+end
+
+function referee.attach_event_log(r, log)
+    r.eventLog = log
+    record(r, "ESTADO", "INÍCIO", r.state, "inicialização da partida")
+end
+
+function referee.record_reposition(r, subject, reason)
+    record(r, subject == "bola" and "REPOSICIONAMENTO_BOLA" or "REPOSICIONAMENTO_JOGADORES",
+        r.state, r.state, reason)
+end
+
+function referee.record_state_change(r, old_state, new_state, reason)
+    record(r, "ESTADO", old_state, new_state, reason)
 end
 
 function referee.is_restart_state(state)
@@ -70,8 +93,9 @@ function referee.is_restart_state(state)
            state == STATE_CORNER or state == STATE_KICKOFF
 end
 
-function referee.begin_restart(r, kind, team, x, y)
+function referee.begin_restart(r, kind, team, x, y, reason)
     local cfg, ball = r.config, r.ball
+    local old_state, old_x, old_y = r.state, ball.x, ball.y
     local state
     if kind == "lateral" then state = STATE_LATERAL
     elseif kind == "goal_kick" then state = STATE_GOAL_KICK
@@ -81,15 +105,19 @@ function referee.begin_restart(r, kind, team, x, y)
     r.restartX, r.restartY = x, y
     r.restartRemaining = r.testShortRestarts and cfg.referee.testRestartTimeout or cfg.referee.restartTimeouts[kind]
     r.restartElapsed, r.noPlayerElapsed = 0, 0
+    r.barrierEvacuationLogged = false
     r.restartEnteredField = false
     r.restartKickerId, r.noRetouch, r.restartKickerSeparated = nil, false, false
     r.lastTouchTeam, r.lastToucherId = team, nil
     r.ballFrozen = true
     r.message = message_for(cfg, kind, team)
     set_frozen_ball(ball, x, y)
+    record(r, "ESTADO", old_state, state, reason or ("início de " .. kind))
+    if old_x ~= x or old_y ~= y then record(r, "REPOSICIONAMENTO_BOLA", state, state, reason or ("cobrança de " .. kind)) end
 end
 
-function referee.begin_play(r, kicker_id)
+function referee.begin_play(r, kicker_id, reason)
+    local old_state = r.state
     r.state = STATE_PLAY
     r.message = ""
     r.ballFrozen = false
@@ -97,20 +125,26 @@ function referee.begin_play(r, kicker_id)
     r.noRetouch = kicker_id ~= nil
     r.restartEnteredField = false
     r.restartRemaining, r.restartElapsed, r.noPlayerElapsed = 0, 0, 0
+    r.barrierEvacuationLogged = false
+    record(r, "ESTADO", old_state, STATE_PLAY, reason or "cobrança executada")
+    for i = 1, #r.players do r.players[i].barrierEscaping = false end
 end
 
 function referee.begin_goal(r, scoring_team)
+    local old_state = r.state
     r.state = STATE_GOAL
+    r.scoringTeam = scoring_team
     r.message = r.config.referee.messages.goal
-    r.stateTimer = r.config.referee.goalPause
+    r.stateTimer = r.config.game.goalCelebrationSeconds
     r.pendingKickoffTeam = other_team(scoring_team)
-    r.ballFrozen = true
+    r.ballFrozen = false
     r.restartKickerId, r.noRetouch, r.restartKickerSeparated = nil, false, false
     r.restartRemaining, r.restartElapsed, r.noPlayerElapsed = 0, 0, 0
-    set_frozen_ball(r.ball, 0, 0)
+    record(r, "ESTADO", old_state, STATE_GOAL, "gol do " .. (scoring_team == "red" and "vermelho" or "azul"))
 end
 
 function referee.end_period(r)
+    local old_state = r.state
     r.ballFrozen = true
     r.restartKickerId, r.noRetouch, r.restartKickerSeparated = nil, false, false
     r.restartRemaining, r.restartElapsed, r.noPlayerElapsed = 0, 0, 0
@@ -124,6 +158,8 @@ function referee.end_period(r)
         r.stateTimer = 0
     end
     set_frozen_ball(r.ball, 0, 0)
+    record(r, "ESTADO", old_state, r.state, r.state == STATE_INTERVAL and "fim do 1º tempo" or "fim de jogo")
+    record(r, "REPOSICIONAMENTO_BOLA", r.state, r.state, "reposicionamento fim de tempo")
 end
 
 function referee.start_second_half(r)
@@ -133,10 +169,11 @@ function referee.start_second_half(r)
     r.halfRemaining = r.halfDuration
     r.regulationExpired = false
     r.graceRemaining = r.config.referee.regulationGrace
-    referee.begin_restart(r, "kickoff", other_team(r.firstKickoffTeam), 0, 0)
+    referee.begin_restart(r, "kickoff", other_team(r.firstKickoffTeam), 0, 0, "início do 2º tempo após troca de lados")
 end
 
 function referee.reset_match(r)
+    local old_state = r.state
     r.half = 1
     r.redAttacksRight = true
     r.firstKickoffTeam = r.config.referee.firstKickoffTeam
@@ -154,6 +191,7 @@ function referee.reset_match(r)
     r.restartKickerId, r.noRetouch, r.restartKickerSeparated = nil, false, false
     r.pendingKickoffTeam = nil
     set_frozen_ball(r.ball, 0, 0)
+    record(r, "ESTADO", old_state, STATE_WARMUP, "reinício solicitado pelo jogador")
 end
 
 function referee.note_touch(r, player)
@@ -181,7 +219,7 @@ function referee.resolve_violation(r)
         kind = "corner"
     elseif kind == "kickoff" then kind, x, y = "kickoff", 0, 0
     else kind = "lateral" end
-    referee.begin_restart(r, kind, team, x, y)
+    referee.begin_restart(r, kind, team, x, y, "toque duplo ou cobrança incorreta")
 end
 
 local function goal_side_team(r, side)
@@ -198,14 +236,14 @@ function referee.detect_exit(r, ball, field)
         if r.state == STATE_PLAY and r.restartKickerId and not r.restartEnteredField then
             return "lateral", other_team(r.restartTeam), r.restartX, r.restartY
         end
-        return "lateral", other_team(last), px, field.top
+        return "lateral", other_team(last), px, field.top, "bola cruzou linha lateral superior"
     elseif y - rad > field.bottom then
         local px = math.max(field.left + r.config.referee.cornerMargin,
                             math.min(field.right - r.config.referee.cornerMargin, x))
         if r.state == STATE_PLAY and r.restartKickerId and not r.restartEnteredField then
             return "lateral", other_team(r.restartTeam), r.restartX, r.restartY
         end
-        return "lateral", other_team(last), px, field.bottom
+        return "lateral", other_team(last), px, field.bottom, "bola cruzou linha lateral inferior"
     end
 
     local side
@@ -216,7 +254,7 @@ function referee.detect_exit(r, ball, field)
     local goal_team = goal_side_team(r, side)
     local goal_top = field.goal_top + field.post_radius + rad
     local goal_bottom = field.goal_bottom - field.post_radius - rad
-    if y >= goal_top and y <= goal_bottom then return "goal", other_team(goal_team), x, y end
+    if y >= goal_top and y <= goal_bottom then return "goal", other_team(goal_team), x, y, "bola cruzou linha de gol" end
 
     if r.state == STATE_PLAY and r.restartKickerId and not r.restartEnteredField then
         if r.restartType == "corner" then return "goal_kick", other_team(r.restartTeam), r.restartX, r.restartY end
@@ -238,7 +276,7 @@ function referee.detect_exit(r, ball, field)
         local half = r.config.field.goal_area_width * 0.5
         place_y = math.max(-half, math.min(half, y))
     end
-    return kind, kind == "goal_kick" and defending_team or attacking_team, place_x, place_y
+    return kind, kind == "goal_kick" and defending_team or attacking_team, place_x, place_y, "bola cruzou linha de fundo"
 end
 
 function referee.record_field_entry(r, ball, field)
@@ -265,22 +303,31 @@ function referee.timeout_restart(r)
         y = y < 0 and r.field.top or r.field.bottom
         kind = "corner"
     elseif kind == "kickoff" then
-        referee.begin_play(r, nil)
+        referee.begin_play(r, nil, "timeout do saque inicial; bola liberada")
         return
     end
-    referee.begin_restart(r, kind, team, x, y)
+    referee.begin_restart(r, kind, team, x, y, "timeout da bola parada")
 end
 
 function referee.clock_tick(r, dt)
-    if r.state == STATE_WARMUP or r.state == STATE_GOAL or r.state == STATE_INTERVAL then
+    r.matchElapsed = r.matchElapsed + dt
+    if r.state == STATE_GOAL then
+        if not r.regulationExpired then
+            r.halfRemaining = math.max(0, r.halfRemaining - dt)
+            if r.halfRemaining <= 0 then r.regulationExpired = true; r.graceRemaining = r.config.referee.regulationGrace end
+        end
+        r.stateTimer = r.stateTimer - dt
+        if r.stateTimer > 0 then return nil end
+        if r.regulationExpired then referee.end_period(r); return "period_end" end
+        referee.begin_restart(r, "kickoff", r.pendingKickoffTeam, 0, 0, "fim da comemoração do gol")
+        return "goal_kickoff"
+    end
+    if r.state == STATE_WARMUP or r.state == STATE_INTERVAL then
         r.stateTimer = r.stateTimer - dt
         if r.stateTimer > 0 then return nil end
         if r.state == STATE_WARMUP then
-            referee.begin_restart(r, "kickoff", r.firstKickoffTeam, 0, 0)
+            referee.begin_restart(r, "kickoff", r.firstKickoffTeam, 0, 0, "fim do aquecimento")
             return "restart"
-        elseif r.state == STATE_GOAL then
-            referee.begin_restart(r, "kickoff", r.pendingKickoffTeam, 0, 0)
-            return "goal_kickoff"
         elseif r.state == STATE_INTERVAL then
             return "second_half"
         end
@@ -313,38 +360,37 @@ end
 
 local function point_forbidden(r, p, x, y)
     local f, cfg, field_cfg = r.field, r.config.referee, r.config.field
-    if x < f.outer_left + p.radius or x > f.outer_right - p.radius or
-       y < f.outer_top + p.radius or y > f.outer_bottom - p.radius then return true end
     if r.restartType == "lateral" then
         local x1, x2, _, zone_top, zone_bottom = referee.throw_in_geometry(r)
-        local min_x, max_x = x1 - p.radius, x2 + p.radius
-        local min_y, max_y = zone_top - p.radius, zone_bottom + p.radius
+        local min_x, max_x = x1 - p.radius - cfg.barrierMargin, x2 + p.radius + cfg.barrierMargin
+        local min_y, max_y = zone_top - p.radius - cfg.barrierMargin,
+                             zone_bottom + p.radius + cfg.barrierMargin
         if x >= min_x and x <= max_x and y >= min_y and y <= max_y then return true end
     elseif r.restartType == "corner" then
         local dx, dy = x - r.restartX, y - r.restartY
-        local radius = cfg.cornerZoneRadius + p.radius
+        local radius = cfg.cornerZoneRadius + p.radius + cfg.barrierMargin
         if dx * dx + dy * dy < radius * radius then return true end
     elseif r.restartType == "goal_kick" then
         local left_side = r.restartX < 0
-        local min_x = left_side and f.left - p.radius or f.right - field_cfg.penalty_area_depth - p.radius
-        local max_x = left_side and f.left + field_cfg.penalty_area_depth + p.radius or f.right + p.radius
-        local half_y = field_cfg.penalty_area_width * 0.5 + p.radius
+        local margin = cfg.barrierMargin
+        local min_x = left_side and f.left - p.radius - margin or f.right - field_cfg.penalty_area_depth - p.radius - margin
+        local max_x = left_side and f.left + field_cfg.penalty_area_depth + p.radius + margin or f.right + p.radius + margin
+        local half_y = field_cfg.penalty_area_width * 0.5 + p.radius + margin
         if x >= min_x and x <= max_x and y >= -half_y and y <= half_y then return true end
     elseif r.restartType == "kickoff" then
         local dx, dy = x - r.restartX, y - r.restartY
-        local radius = f.center_radius + p.radius
+        local radius = f.center_radius + p.radius + cfg.barrierMargin
         if dx * dx + dy * dy < radius * radius then return true end
         local red_own_sign = r.redAttacksRight and -1 or 1
         local restart_own_sign = r.restartTeam == "red" and red_own_sign or -red_own_sign
-        if p.team ~= r.restartTeam and x * restart_own_sign > -p.radius then return true end
+        if p.team ~= r.restartTeam and x * restart_own_sign > -p.radius - cfg.barrierMargin then return true end
     end
     return false
 end
 
 function referee.throw_in_geometry(r)
     local f, cfg = r.field, r.config.referee
-    local x1 = math.max(f.left, r.restartX - cfg.throwInLineLength * 0.5)
-    local x2 = math.min(f.right, r.restartX + cfg.throwInLineLength * 0.5)
+    local x1, x2 = f.outer_left, f.outer_right
     local line_y = r.restartY < 0 and f.top + cfg.throwInLineOffset or f.bottom - cfg.throwInLineOffset
     local zone_top = r.restartY < 0 and f.outer_top or line_y
     local zone_bottom = r.restartY < 0 and line_y or f.outer_bottom
@@ -352,10 +398,15 @@ function referee.throw_in_geometry(r)
 end
 
 function referee.is_point_restricted(r, p, x, y)
+    if p.team == r.restartTeam then return false end
     return point_forbidden(r, p, x or p.x, y or p.y)
 end
 
 local function consider(r, p, x, y, best_x, best_y, best_d)
+    if x < r.field.outer_left + p.radius or x > r.field.outer_right - p.radius or
+       y < r.field.outer_top + p.radius or y > r.field.outer_bottom - p.radius then
+        return best_x, best_y, best_d
+    end
     if point_forbidden(r, p, x, y) then return best_x, best_y, best_d end
     local dx, dy = x - p.x, y - p.y
     local d = dx * dx + dy * dy
@@ -383,22 +434,38 @@ function referee.restriction_target(r, p)
     local f, cfg, field_cfg = r.field, r.config.referee, r.config.field
     if r.restartType == "lateral" then
         local x1, x2, _, zone_top, zone_bottom = referee.throw_in_geometry(r)
-        local min_x, max_x = x1 - p.radius, x2 + p.radius
-        local min_y, max_y = zone_top - p.radius, zone_bottom + p.radius
+        local min_x, max_x = x1 + p.radius + cfg.barrierMargin, x2 - p.radius - cfg.barrierMargin
+        local min_y, max_y = zone_top - p.radius - cfg.barrierMargin,
+                             zone_bottom + p.radius + cfg.barrierMargin
         local inward_y = r.restartY < 0 and max_y + cfg.zoneTargetMargin or min_y - cfg.zoneTargetMargin
         local edge_x = math.max(min_x, math.min(max_x, p.x))
         if clear_of_frozen_ball(r, p, edge_x, inward_y, cfg.zoneTargetMargin) then
             best_x, best_y, best_d = consider(r, p, edge_x, inward_y, best_x, best_y, best_d)
         end
-        local side_y = math.max(f.outer_top + p.radius,
-            math.min(f.outer_bottom - p.radius, p.y))
-        best_x, best_y, best_d = consider(r, p, min_x - cfg.zoneTargetMargin, side_y,
-            best_x, best_y, best_d)
-        best_x, best_y, best_d = consider(r, p, max_x + cfg.zoneTargetMargin, side_y,
-            best_x, best_y, best_d)
+        local bypass = (p.radius + r.ball.radius + cfg.zoneTargetMargin + cfg.barrierMargin) *
+            cfg.barrierEvacuationClearanceScale
+        local alternate_x = math.max(min_x, math.min(max_x, p.x - bypass))
+        if clear_of_frozen_ball(r, p, alternate_x, inward_y, cfg.zoneTargetMargin) then
+            best_x, best_y, best_d = consider(r, p, alternate_x, inward_y, best_x, best_y, best_d)
+        end
+        alternate_x = math.max(min_x, math.min(max_x, p.x + bypass))
+        if clear_of_frozen_ball(r, p, alternate_x, inward_y, cfg.zoneTargetMargin) then
+            best_x, best_y, best_d = consider(r, p, alternate_x, inward_y, best_x, best_y, best_d)
+        end
+        if best_d == math.huge then
+            best_x, best_y, best_d = consider(r, p, edge_x, inward_y, best_x, best_y, best_d)
+        end
     elseif r.restartType == "corner" or r.restartType == "kickoff" then
         local radius = r.restartType == "kickoff" and f.center_radius or cfg.cornerZoneRadius
-        radius = radius + p.radius + cfg.zoneTargetMargin
+        radius = radius + p.radius + cfg.barrierMargin + cfg.zoneTargetMargin
+        local radial_x, radial_y = p.x - r.restartX, p.y - r.restartY
+        local radial_length = math.sqrt(radial_x * radial_x + radial_y * radial_y)
+        if radial_length > 0.0001 then
+            best_x, best_y, best_d = consider(r, p,
+                r.restartX + radial_x / radial_length * radius,
+                r.restartY + radial_y / radial_length * radius,
+                best_x, best_y, best_d)
+        end
         local count = cfg.zoneDirections
         for i = 0, count - 1 do
             local angle = (i / count) * math.pi * 2
@@ -410,21 +477,22 @@ function referee.restriction_target(r, p)
             local red_own_sign = r.redAttacksRight and -1 or 1
             local restart_own_sign = r.restartTeam == "red" and red_own_sign or -red_own_sign
             local side_sign = -restart_own_sign
-            local edge_x = side_sign * (p.radius + cfg.zoneTargetMargin)
+            local edge_x = side_sign * (p.radius + cfg.barrierMargin + cfg.zoneTargetMargin)
             local edge_y = math.max(f.outer_top + p.radius,
                 math.min(f.outer_bottom - p.radius, p.y))
             best_x, best_y, best_d = consider(r, p, edge_x, edge_y, best_x, best_y, best_d)
             edge_y = math.max(f.outer_top + p.radius,
-                math.min(f.outer_bottom - p.radius, r.restartY + side_sign * (f.center_radius + p.radius + cfg.zoneTargetMargin)))
+                math.min(f.outer_bottom - p.radius, r.restartY + side_sign * (f.center_radius + p.radius + cfg.barrierMargin + cfg.zoneTargetMargin)))
             best_x, best_y, best_d = consider(r, p, edge_x, edge_y, best_x, best_y, best_d)
         end
     elseif r.restartType == "goal_kick" then
         local left_side = r.restartX < 0
         local margin = cfg.zoneTargetMargin
-        local min_x = left_side and f.left - p.radius - margin or f.right - field_cfg.penalty_area_depth - p.radius - margin
-        local max_x = left_side and f.left + field_cfg.penalty_area_depth + p.radius + margin or f.right + p.radius + margin
-        local min_y, max_y = -field_cfg.penalty_area_width * 0.5 - p.radius - margin,
-                              field_cfg.penalty_area_width * 0.5 + p.radius + margin
+        local total_margin = p.radius + cfg.barrierMargin + margin
+        local min_x = left_side and f.left - total_margin or f.right - field_cfg.penalty_area_depth - total_margin
+        local max_x = left_side and f.left + field_cfg.penalty_area_depth + total_margin or f.right + total_margin
+        local min_y, max_y = -field_cfg.penalty_area_width * 0.5 - total_margin,
+                              field_cfg.penalty_area_width * 0.5 + total_margin
         local edge_y = math.max(min_y, math.min(max_y, p.y))
         best_x, best_y, best_d = consider(r, p, min_x, edge_y, best_x, best_y, best_d)
         best_x, best_y, best_d = consider(r, p, max_x, edge_y, best_x, best_y, best_d)

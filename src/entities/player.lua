@@ -9,6 +9,7 @@ function player.new(data, config, spawn_x, spawn_y)
         number = data.number or 1,
         keys = data.keys,
         spin_keys = data.spin_keys,
+        allow_spin = data.allow_spin == true,
         color = data.color,
         inner_color = data.inner_color,
         x = spawn_x,

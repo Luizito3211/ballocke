@@ -11,7 +11,7 @@ config.viewport = {
     world_top_reserved = 70, world_bottom_reserved = 50,
 }
 
-config.default_mode = "2v2"
+config.default_mode = "1v1"
 config.mode_names = { "1v1", "2v2", "3v3", "4v4", "5v5" }
 config.formations = {
     ["1v1"] = { capacity = 1, red = { { x = -650, y = 0 } }, blue = { { x = 650, y = 0 } } },
@@ -80,19 +80,22 @@ config.spin_selector = {
     cue_radius = 8,
     move_speed = 2.0,
     reset_key = "c",
-    local_keyboard_enabled = false,
+    local_keyboard_enabled = true,
 }
 
 config.trajectory = { max_ticks = 120, max_bounces = 2, step_stride = 2 }
-config.game = { goal_reset_delay = 2.0, halfDuration = 300, testHalfDuration = 60 }
+config.game = {
+    halfDuration = 300, testHalfDuration = 60,
+    goalCelebrationSeconds = 7,
+}
 config.referee = {
-    warmupDuration = 2.0, goalPause = 2.0, intermissionDuration = 5.0,
+    warmupDuration = 2.0, intermissionDuration = 5.0,
     regulationGrace = 15.0, noPlayerAutoRelease = 2.0,
-    restartTimeouts = { lateral = 20, goal_kick = 20, corner = 25, kickoff = 25 },
+    restartTimeouts = { lateral = 0, goal_kick = 0, corner = 0, kickoff = 0 },
     testRestartTimeout = 1.0, cornerZoneRadius = 350, cornerMargin = 100,
-    throwInLineOffset = 250, throwInLineLength = 900, throwInLineEndMarkLength = 24,
-    zonePushGain = 3.0, zonePushResponse = 4.0, zonePushSpeed = 220,
+    throwInLineOffset = 250, throwInLineEndMarkLength = 24,
     zoneTargetMargin = 3, restartTouchSeparationPadding = 0.5,
+    barrierMargin = 2, barrierEvacuationSpeed = 220, barrierEvacuationClearanceScale = 4,
     zoneFillAlpha = 0.16, zoneLineAlpha = 0.75, zoneLineWidth = 3,
     frozenRingRadius = 35, frozenRingPulseAmplitude = 2, frozenRingPulseRate = 4,
     frozenRingLineWidth = 6, frozenRingAlpha = 0.98, frozenRingFillAlpha = 0.28,
@@ -108,6 +111,7 @@ config.referee = {
         cornerRed = "ESCANTEIO - VERMELHO", cornerBlue = "ESCANTEIO - AZUL",
     },
 }
+config.eventLog = { path = "arbitro.log", capacity = 2000, flushInterval = 3 }
 config.testPanel = {
     key = "f6", playerToBallKey = "f7", saveKey = "s",
     lateralTop = 1, lateralBottom = 2, endLeft = 3, endRight = 4,
@@ -133,12 +137,14 @@ config.calibration = {
 config.players = {
     { id = "p1", name = "P1", team = "red", number = 1,
       color = {0.88, 0.22, 0.22}, inner_color = {0.65, 0.15, 0.15},
+      allow_spin = true,
       keys = { up = "w", down = "s", left = "a", right = "d", kick = "space" },
-      spin_keys = { up = "t", down = "g", left = "f", right = "h", reset = "c" } },
+      spin_keys = { up = "up", down = "down", left = "left", right = "right", reset = "c" } },
     { id = "p2", name = "P2", team = "blue", number = 1,
       color = {0.22, 0.48, 0.88}, inner_color = {0.15, 0.32, 0.65},
-      keys = { up = "up", down = "down", left = "left", right = "right", kick = "rshift" },
-      spin_keys = { up = "up", down = "down", left = "left", right = "right", reset = "delete" } },
+      allow_spin = false,
+      keys = { up = "i", down = "k", left = "j", right = "l", kick = "return" },
+      spin_keys = nil },
     { id = "p3", name = "P3", team = "red", number = 2,
       color = {0.95, 0.40, 0.20}, inner_color = {0.75, 0.22, 0.10},
       keys = { up = "i", down = "k", left = "j", right = "l", kick = "u" },

@@ -15,9 +15,9 @@ function ui.new(config)
     u.text_score = love.graphics.newText(u.font_score, "0  -  0")
     u.text_p1_label = love.graphics.newText(u.font_hud, "VERMELHO")
     u.text_p2_label = love.graphics.newText(u.font_hud, "AZUL")
-    u.text_goal_banner = love.graphics.newText(u.font_score, "GOOOOL!")
-    u.text_instructions = love.graphics.newText(u.font_hud, "P1: WASD+Espaço | P2: Setas+RShift | P3: IJKL+U | P4: 8456+0 | Mouse/C: Efeito | F2: Modo | F3: Debug | F4: Colisores")
-    u.text_debug = love.graphics.newText(u.font_debug, "FPS: 60  |  Lua RAM: 0 KB  |  Modo: 2v2 (4/4 jogadores)")
+    u.text_goal_banner = love.graphics.newText(u.font_score, "GOL!")
+    u.text_instructions = love.graphics.newText(u.font_hud, "VERMELHO: WASD + Espaço | AZUL: IJKL + Enter | Setas/C: efeito vermelho | F2: modo | F3: debug | F4: colisores")
+    u.text_debug = love.graphics.newText(u.font_debug, "FPS: 60  |  Lua RAM: 0 KB  |  Modo: 1v1 (2/2 jogadores)")
     u.text_spin_label = love.graphics.newText(u.font_mini, "EFEITO (C)")
     u.text_reset_icon = love.graphics.newText(u.font_mini, "C")
     u.font_ref = love.graphics.newFont(18)
@@ -152,7 +152,7 @@ function ui.draw_hud(u, game_state, colors, virtual_width, virtual_height)
         love.graphics.setColor(0, 0, 0, 0.75)
         love.graphics.rectangle("fill", cx - banner_w / 2 - 24, banner_y - 8, banner_w + 48, banner_h + 16, 8, 8)
 
-        if game_state.last_scorer == "p1" then
+        if game_state.referee.scoringTeam == "red" then
             love.graphics.setColor(colors.score_p1)
         else
             love.graphics.setColor(colors.score_p2)
@@ -183,7 +183,8 @@ function ui.draw_spin_selector(u, game_state, colors, virtual_width, virtual_hei
     local btn_r = 10
 
     -- Identifica o jogador a exibir (prioriza quem está na posse ou P1)
-    local active_player = game_state.possessor_player or (game_state.players and game_state.players[1])
+    local active_player = game_state.players and game_state.players[1]
+    if not active_player or not active_player.allow_spin then return end
     local sx = (active_player and active_player.spin_x) or 0
     local sy = (active_player and active_player.spin_y) or 0
 

@@ -110,7 +110,7 @@ function game.set_mode(g, mode_name, num_players)
 end
 
 -- Reinicia posições para o início da jogada (kick-off)
-function game.reset_positions(g, swap_sides)
+function game.reset_positions(g, swap_sides, reason)
     if swap_sides then
         for i = 1, #g.players do g.players[i].spawn_x = -g.players[i].spawn_x end
     end
@@ -125,31 +125,18 @@ function game.reset_positions(g, swap_sides)
     g.last_scorer = nil
     g.trajectory_count = 0
     g.possessor_player = nil
+    if g.referee and g.referee.eventLog then
+        referee_mod.record_reposition(g.referee, "bola", reason or "reposicionamento de jogadores/bola")
+        referee_mod.record_reposition(g.referee, "jogadores", reason or "reposicionamento de jogadores/bola")
+    end
 end
 
 -- Reinicia partida inteira (placar zerado)
 function game.reset_match(g)
     g.score_p1 = 0
     g.score_p2 = 0
-    g:reset_positions()
+    g:reset_positions(false, "reinício solicitado pelo jogador")
     referee_mod.reset_match(g.referee)
-end
-
-local function push_player_to_valid_zone(p, target_x, target_y, dt, cfg)
-    local dx, dy = target_x - p.x, target_y - p.y
-    local distance_sq = dx * dx + dy * dy
-    if distance_sq < 0.01 then return end
-    local distance = math.sqrt(distance_sq)
-    local speed = math.min(cfg.referee.zonePushSpeed, distance * cfg.referee.zonePushGain)
-    local desired_x, desired_y = dx / distance * speed, dy / distance * speed
-    local response = math.min(1, cfg.referee.zonePushResponse * dt)
-    p.vx = p.vx + (desired_x - p.vx) * response
-    p.vy = p.vy + (desired_y - p.vy) * response
-    local speed_sq = p.vx * p.vx + p.vy * p.vy
-    if speed_sq > p.max_speed * p.max_speed then
-        local factor = p.max_speed / math.sqrt(speed_sq)
-        p.vx, p.vy = p.vx * factor, p.vy * factor
-    end
 end
 
 local function resolve_frozen_ball_player(p, ball)
@@ -173,6 +160,11 @@ local function resolve_frozen_ball_player(p, ball)
     end
 end
 
+local function evacuating_from_barrier(r, p)
+    return referee_mod.is_restart_state(r.state) and p.team ~= r.restartTeam and
+        referee_mod.is_point_restricted(r, p, p.x, p.y)
+end
+
 local function record_goal(g, scoring_team)
     if scoring_team == "red" then
         g.score_p1 = g.score_p1 + 1
@@ -182,7 +174,7 @@ local function record_goal(g, scoring_team)
         g.last_scorer = "p2"
     end
     g.is_goal_delay = true
-    g.goal_delay_timer = g.config.referee.goalPause
+    g.goal_delay_timer = g.config.game.goalCelebrationSeconds
     referee_mod.begin_goal(g.referee, scoring_team)
 end
 
@@ -194,25 +186,31 @@ function game.step_fixed(g, dt, commands)
     b.prev_x, b.prev_y = b.x, b.y
     for i = 1, num_p do players[i].prev_x, players[i].prev_y = players[i].x, players[i].y end
 
+    local was_celebrating = r.state == referee_mod.STATE_GOAL
     local transition = referee_mod.clock_tick(r, dt)
     if transition == "second_half" then
-        g:reset_positions(true)
+        g:reset_positions(true, "troca de lados no intervalo")
         referee_mod.start_second_half(r)
     elseif transition == "goal_kickoff" then
-        if cfg.game.kickOffReset == "full" then g:reset_positions() end
+        if cfg.game.kickOffReset == "full" then g:reset_positions(false, "reposicionamento kickOffReset após comemoração") end
         g.is_goal_delay = false
         g.goal_delay_timer = 0
     elseif transition == "period_end" then
+        if was_celebrating and cfg.game.kickOffReset == "full" then
+            g:reset_positions(false, "reposicionamento kickOffReset após fim de tempo")
+        end
         g.is_goal_delay = false
         return
     end
 
-    if r.state == referee_mod.STATE_WARMUP or r.state == referee_mod.STATE_GOAL or
+    if r.state == referee_mod.STATE_WARMUP or
        r.state == referee_mod.STATE_INTERVAL or r.state == referee_mod.STATE_FINISHED then
-        g.is_goal_delay = r.state == referee_mod.STATE_GOAL
-        g.goal_delay_timer = r.state == referee_mod.STATE_GOAL and r.stateTimer or 0
+        g.is_goal_delay = false
+        g.goal_delay_timer = 0
         return
     end
+
+    local celebration = r.state == referee_mod.STATE_GOAL
 
     local frozen_at_start = r.ballFrozen
     if referee_mod.is_restart_state(r.state) then
@@ -220,11 +218,11 @@ function game.step_fixed(g, dt, commands)
         if not referee_mod.has_team_player(players, r.restartTeam) then
             r.noPlayerElapsed = r.noPlayerElapsed + dt
             if r.noPlayerElapsed >= cfg.referee.noPlayerAutoRelease then
-                referee_mod.begin_play(r, nil)
+                referee_mod.begin_play(r, nil, "time da cobrança sem jogadores por 2 segundos")
                 frozen_at_start = false
             end
         end
-        if r.ballFrozen then
+        if r.ballFrozen and r.restartRemaining > 0 then
             r.restartRemaining = r.restartRemaining - dt
             if r.restartRemaining <= 0 then
                 referee_mod.timeout_restart(r)
@@ -240,11 +238,7 @@ function game.step_fixed(g, dt, commands)
             local p, cmd = players[i], commands[i]
             p:step_physics(dt, cmd.moveX, cmd.moveY, false, cmd.spinX, cmd.spinY,
                            physics, nil, cfg.spin)
-            if p.team ~= r.restartTeam then
-                local tx, ty = referee_mod.restriction_target(r, p)
-                push_player_to_valid_zone(p, tx, ty, dt, cfg)
-            end
-            resolve_frozen_ball_player(p, b)
+            if not evacuating_from_barrier(r, p) then resolve_frozen_ball_player(p, b) end
         end
 
         -- Apenas um jogador do time autorizado pode liberar a bola com chute.
@@ -278,7 +272,9 @@ function game.step_fixed(g, dt, commands)
     end
 
         if frozen_at_start then
-            for i = 1, num_p do resolve_frozen_ball_player(players[i], b) end
+            for i = 1, num_p do
+                if not evacuating_from_barrier(r, players[i]) then resolve_frozen_ball_player(players[i], b) end
+            end
         end
 
     if not frozen_at_start then
@@ -328,17 +324,48 @@ function game.step_fixed(g, dt, commands)
         for j = 1, num_p do physics.resolve_circle_segment(players[j], wall, 0.1) end
     end
 
-    if illegal_touch and not frozen_at_start then
+    if celebration then
+        -- A física segue ativa durante a comemoração; o árbitro ignora gols e saídas.
+    elseif illegal_touch and not frozen_at_start then
         referee_mod.resolve_violation(r)
         if referee_mod.ball_stopped(r) then return end
     elseif not frozen_at_start then
         referee_mod.record_field_entry(r, b, f)
-        local kind, team, place_x, place_y = referee_mod.detect_exit(r, b, f)
+        local kind, team, place_x, place_y, reason = referee_mod.detect_exit(r, b, f)
         if kind == "goal" then
             record_goal(g, team)
         elseif kind then
-            referee_mod.begin_restart(r, kind, team, place_x, place_y)
+            referee_mod.begin_restart(r, kind, team, place_x, place_y, reason)
             if referee_mod.ball_stopped(r) then return end
+        end
+    end
+
+    -- A barreira é resolvida por último, depois dos contatos com jogadores, bola e paredes.
+    if referee_mod.is_restart_state(r.state) then
+        local evacuated_inside = false
+        for i = 1, num_p do
+            local p = players[i]
+            if p.team ~= r.restartTeam and referee_mod.is_point_restricted(r, p, p.x, p.y) then
+                local was_inside = referee_mod.is_point_restricted(r, p, p.prev_x, p.prev_y)
+                if was_inside and not r.barrierEvacuationLogged then evacuated_inside = true end
+                local tx, ty = referee_mod.restriction_target(r, p)
+                local dx, dy = tx - p.x, ty - p.y
+                local dist = math.sqrt(dx * dx + dy * dy)
+                if dist > 0.0001 then
+                    if was_inside then
+                        local step = math.min(dist, cfg.referee.barrierEvacuationSpeed * dt)
+                        p.x, p.y = p.x + dx / dist * step, p.y + dy / dist * step
+                    else
+                        p.x, p.y = tx, ty
+                    end
+                    local into = p.vx * dx + p.vy * dy
+                    if into < 0 then p.vx, p.vy = p.vx - dx / dist * into / dist, p.vy - dy / dist * into / dist end
+                end
+            end
+        end
+        if evacuated_inside then
+            referee_mod.record_reposition(r, "jogadores", "evacuação suave ao surgir a barreira da bola parada")
+            r.barrierEvacuationLogged = true
         end
     end
 
@@ -368,7 +395,7 @@ function game.update_presentation(g)
     end
 
     -- Se há jogador na posse e o jogo não está pausado por gol, calcula trajetória prevista
-    if g.possessor_player and (not g.is_goal_delay) then
+    if g.possessor_player and g.possessor_player.allow_spin and (not g.is_goal_delay) then
         local p = g.possessor_player
         local sb = g.scratch_ball
         local pts = g.trajectory_points
@@ -443,7 +470,7 @@ function game.draw(g, show_colliders, alpha)
     end
 
     -- 2. Linha de trajetória pontilhada (apenas para o jogador na posse)
-    if g.trajectory_count > 0 and g.possessor_player then
+    if g.trajectory_count > 0 and g.possessor_player and g.possessor_player.allow_spin then
         local pts = g.trajectory_points
         local count = g.trajectory_count
         local stride = (cfg.trajectory and cfg.trajectory.step_stride) or 2

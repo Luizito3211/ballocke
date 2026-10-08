@@ -7,12 +7,14 @@ local camera_mod = require "src.camera"
 local calibration_mod = require "src.calibration"
 local preferences = require "src.preferences"
 local referee_mod = require "src.referee"
+local EventLog = require "src.event_log"
 
 local game_inst
 local ui_inst
 local calibration_inst
 local referee_panel_open = false
 local referee_test_touch = 1
+local event_log
 
 local accumulator = 0
 local screen_scale = 1
@@ -42,12 +44,17 @@ function love.initialize_game(filesystem, num_players, game_config)
     local active_config = game_config or config
     config.camera.viewWidth = preferences.read_view_width(config, filesystem)
     local mode = num_players == 1 and "1v1" or (num_players == 10 and "5v5" or active_config.default_mode)
-    game_inst = game_mod.new(active_config, mode, num_players or #active_config.players)
+    local requested_players = num_players or 2
+    game_inst = game_mod.new(active_config, mode, requested_players)
     game_inst.is_training = true
     ui_inst = ui_mod.new(active_config)
     calibration_inst = calibration_mod.new(active_config, game_inst)
     ui_inst:update_score(game_inst.score_p1, game_inst.score_p2)
     ui_inst:update_referee(game_inst.referee)
+    if filesystem == nil then
+        event_log = EventLog.new(love.filesystem, active_config.eventLog)
+        referee_mod.attach_event_log(game_inst.referee, event_log)
+    end
     love.resize(love.graphics.getDimensions())
     return game_inst
 end
@@ -60,13 +67,13 @@ function love.configure_smoke_overlays(enabled)
     referee_panel_open = enabled
 end
 
-function love.load(arg)
+function love.load(arg, unfiltered_arg)
     pcall(function() io.stdout:setvbuf("no") end)
-
     -- Verificação do modo de testes (--test)
-    if arg then
-        for i = 1, #arg do
-            if arg[i] == "--test" then
+    if arg or unfiltered_arg or _G.arg then
+        for _, arguments in ipairs({ arg or {}, unfiltered_arg or {}, _G.arg or {} }) do
+        for i = 1, #arguments do
+            if arguments[i] == "--test" then
                 local test_mod = require "tests.test_physics"
                 local ok, all_passed = xpcall(test_mod.run, debug.traceback)
                 if not ok then io.stderr:write("ERRO NO TESTE:\n", tostring(all_passed), "\n") end
@@ -75,6 +82,7 @@ function love.load(arg)
                 os.exit(all_passed and 0 or 1)
                 return
             end
+        end
         end
     end
 
@@ -97,6 +105,7 @@ end
 
 function love.update(dt)
     if not game_inst then return end
+    if event_log then event_log:update(dt) end
     last_dt = dt
     if referee_panel_open then return end
     if calibration_inst and calibration_inst.open then
@@ -116,7 +125,7 @@ function love.update(dt)
     local vmy = (win_my - offset_y) / screen_scale
     local is_mouse_down = love.mouse.isDown(1)
 
-    local target_p = game_inst.possessor_player or (game_inst.players and game_inst.players[1])
+    local target_p = game_inst.players and game_inst.players[1]
     local vw = config.viewport.width
     local vh = config.viewport.height
     local r = (config.spin_selector and config.spin_selector.radius) or 40
@@ -162,6 +171,10 @@ function love.update(dt)
     game_inst:update_presentation()
     ui_inst:update_score(game_inst.score_p1, game_inst.score_p2)
     ui_inst:update_referee(game_inst.referee)
+end
+
+function love.quit()
+    if event_log then event_log:flush() end
 end
 
 function love.draw()
@@ -243,12 +256,15 @@ function love.keypressed(key)
             p.y = math.max(f.outer_top + p.radius,
                 math.min(f.outer_bottom - p.radius, b.y))
             p.prev_x, p.prev_y, p.vx, p.vy = p.x, p.y, 0, 0
+            referee_mod.record_reposition(r, "jogadores", "reposicionamento manual F7")
         elseif key == "return" or key == "kpenter" then
             local row = ui_inst.test_selection
             if row >= 1 and row <= 4 then
                 local f, b = game_inst.field, game_inst.ball
                 if r.lastTouchTeam then r.lastTouchTeam = nil end
+                local old_state = r.state
                 r.state, r.restartKickerId, r.noRetouch = referee_mod.STATE_PLAY, nil, false
+                referee_mod.record_state_change(r, old_state, r.state, "estado alterado para teste manual F6")
                 if referee_test_touch == 2 then r.lastTouchTeam = "red"
                 elseif referee_test_touch == 3 then r.lastTouchTeam = "blue" end
                 local o = config.testPanel.outOffset
@@ -257,6 +273,7 @@ function love.keypressed(key)
                 elseif row == config.testPanel.endLeft then b.x, b.y = f.left - b.radius - o, -(config.field.goal_mouth_width / 2 + config.field.post_radius + b.radius + o)
                 else b.x, b.y = f.right + b.radius + o, -(config.field.goal_mouth_width / 2 + config.field.post_radius + b.radius + o) end
                 b.prev_x, b.prev_y, b.vx, b.vy = b.x, b.y, 0, 0
+                referee_mod.record_reposition(r, "bola", "teleporte manual pelo painel F6")
                 r.ballFrozen = false
                 referee_panel_open = false
             elseif row == 6 then set_short_restarts(r, not r.testShortRestarts)
@@ -309,14 +326,19 @@ function love.keypressed(key)
                 if config.mode_names[i] == game_inst.mode_name then current_index = i; break end
             end
             local next_index = current_index % #config.mode_names + 1
-            game_inst:set_mode(config.mode_names[next_index], #config.players)
+            game_inst:set_mode(config.mode_names[next_index], 2)
+            if event_log then
+                referee_mod.attach_event_log(game_inst.referee, event_log)
+                referee_mod.record_reposition(game_inst.referee, "jogadores", "reposicionamento manual ao trocar modo F2")
+                referee_mod.record_reposition(game_inst.referee, "bola", "reposicionamento manual ao trocar modo F2")
+            end
             calibration_inst:apply()
             love.resize(love.graphics.getDimensions())
             ui_inst:update_score(game_inst.score_p1, game_inst.score_p2)
         end
     elseif key == (config.spin_selector and config.spin_selector.reset_key) then
         -- Tecla de reset do efeito (padrão C)
-        local target_p = game_inst and (game_inst.possessor_player or game_inst.players[1])
+        local target_p = game_inst and game_inst.players[1]
         if target_p then target_p:reset_spin() end
     end
 end
