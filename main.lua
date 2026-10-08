@@ -8,10 +8,14 @@ local game_inst
 local ui_inst
 
 local accumulator = 0
-local scale = 1
+local screen_scale = 1
+local world_scale = 1
+local world_center_x = 0
+local world_center_y = 0
 local offset_x = 0
 local offset_y = 0
 local show_debug = true
+local show_colliders = false
 local last_dt = 0.016
 local spin_keyboard_enabled = false
 local mouse_just_pressed = false
@@ -35,7 +39,7 @@ function love.load(arg)
     spin_keyboard_enabled = (config.spin_selector and config.spin_selector.local_keyboard_enabled) or false
 
     -- Inicialização do jogo e interface
-    game_inst = game_mod.new(config, config.default_preset, #config.players)
+    game_inst = game_mod.new(config, config.default_mode, #config.players)
     ui_inst = ui_mod.new(config)
     ui_inst:update_score(game_inst.score_p1, game_inst.score_p2)
 
@@ -43,14 +47,22 @@ function love.load(arg)
 end
 
 function love.resize(w, h)
-    if not game_inst or not game_inst.current_preset then return end
-    local vw = game_inst.current_preset.virtual_width
-    local vh = game_inst.current_preset.virtual_height
+    if not game_inst or not game_inst.field then return end
+    local vw = config.viewport.width
+    local vh = config.viewport.height
     local scale_x = w / vw
     local scale_y = h / vh
-    scale = math.min(scale_x, scale_y)
-    offset_x = math.floor((w - vw * scale) / 2)
-    offset_y = math.floor((h - vh * scale) / 2)
+    screen_scale = math.min(scale_x, scale_y)
+    offset_x = math.floor((w - vw * screen_scale) / 2)
+    offset_y = math.floor((h - vh * screen_scale) / 2)
+    local field = game_inst.field
+    local world_w = field.outer_width + config.viewport.world_padding * 2
+    local world_h = field.outer_height + config.viewport.world_padding * 2
+    local available_w = vw - config.viewport.world_left_reserved - config.viewport.world_right_reserved
+    local available_h = vh - config.viewport.world_top_reserved - config.viewport.world_bottom_reserved
+    world_scale = math.min(available_w / world_w, available_h / world_h)
+    world_center_x = config.viewport.world_left_reserved + available_w * 0.5
+    world_center_y = config.viewport.world_top_reserved + available_h * 0.5
 end
 
 function love.update(dt)
@@ -59,13 +71,13 @@ function love.update(dt)
 
     -- 1. Captura e processamento do mouse no seletor de efeito (coordenadas virtuais)
     local win_mx, win_my = love.mouse.getPosition()
-    local vmx = (win_mx - offset_x) / scale
-    local vmy = (win_my - offset_y) / scale
+    local vmx = (win_mx - offset_x) / screen_scale
+    local vmy = (win_my - offset_y) / screen_scale
     local is_mouse_down = love.mouse.isDown(1)
 
     local target_p = game_inst.possessor_player or (game_inst.players and game_inst.players[1])
-    local vw = game_inst.current_preset.virtual_width
-    local vh = game_inst.current_preset.virtual_height
+    local vw = config.viewport.width
+    local vh = config.viewport.height
     local r = (config.spin_selector and config.spin_selector.radius) or 40
     local widget_cx = vw - 60
     local widget_cy = vh - 60
@@ -103,31 +115,33 @@ function love.update(dt)
 end
 
 function love.draw()
-    if not game_inst or not game_inst.current_preset then return end
-    local vw = game_inst.current_preset.virtual_width
-    local vh = game_inst.current_preset.virtual_height
+    if not game_inst or not game_inst.field then return end
+    local vw = config.viewport.width
+    local vh = config.viewport.height
 
     -- Limpa fundo exterior
     love.graphics.clear(config.colors.clear)
 
     -- Renderização com escala proporcional e centralizada nas coordenadas virtuais
     love.graphics.push()
+    love.graphics.setScissor(offset_x, offset_y, vw * screen_scale, vh * screen_scale)
     love.graphics.translate(offset_x, offset_y)
-    love.graphics.scale(scale, scale)
+    love.graphics.scale(screen_scale, screen_scale)
 
-    love.graphics.setScissor(offset_x, offset_y, vw * scale, vh * scale)
-
-    -- Desenha campo, traves, jogadores, linha de trajetória e bola
-    game_inst:draw()
+    -- Enquadramento provisório: arena inteira, com a origem (0,0) no centro.
+    love.graphics.push()
+    love.graphics.translate(world_center_x, world_center_y)
+    love.graphics.scale(world_scale, world_scale)
+    game_inst:draw(show_colliders)
+    love.graphics.pop()
 
     -- Desenha HUD, placar e seletor de efeito
     ui_inst:draw_hud(game_inst, config.colors, vw, vh)
 
-    love.graphics.setScissor()
-    love.graphics.pop()
-
     -- Overlay de debug (F3)
     ui_inst:draw_debug(last_dt, show_debug, game_inst)
+    love.graphics.setScissor()
+    love.graphics.pop()
 end
 
 function love.mousepressed(x, y, button)
@@ -149,15 +163,16 @@ function love.keypressed(key)
     elseif key == config.keys.fullscreen then
         love.window.setFullscreen(not love.window.getFullscreen())
         love.resize(love.graphics.getDimensions())
-    elseif key == config.keys.cycle_preset then
+    elseif key == config.keys.debug_colliders then
+        show_colliders = not show_colliders
+    elseif key == config.keys.cycle_mode then
         if game_inst then
-            local current = game_inst.preset_name
-            local next_p = "1v1"
-            if current == "1v1" then next_p = "2v2"
-            elseif current == "2v2" then next_p = "3v3"
-            else next_p = "1v1" end
-
-            game_inst:set_preset(next_p, #config.players)
+            local current_index = 1
+            for i = 1, #config.mode_names do
+                if config.mode_names[i] == game_inst.mode_name then current_index = i; break end
+            end
+            local next_index = current_index % #config.mode_names + 1
+            game_inst:set_mode(config.mode_names[next_index], #config.players)
             love.resize(love.graphics.getDimensions())
             ui_inst:update_score(game_inst.score_p1, game_inst.score_p2)
         end
@@ -165,7 +180,5 @@ function love.keypressed(key)
         -- Tecla de reset do efeito (padrão C)
         local target_p = game_inst and (game_inst.possessor_player or game_inst.players[1])
         if target_p then target_p:reset_spin() end
-    elseif key == config.keys.toggle_spin_keyboard then
-        spin_keyboard_enabled = not spin_keyboard_enabled
     end
 end

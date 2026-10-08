@@ -38,26 +38,28 @@ function game.new(config, preset_name, num_players)
     }
 
     setmetatable(g, { __index = game })
-    g:set_preset(preset_name or config.default_preset or "3v3", num_players or #config.players)
+    g:set_mode(preset_name or config.default_mode or "2v2", num_players or #config.players)
 
     return g
 end
 
 -- Configura ou troca o preset de campo e reconstrói jogadores e colisores
-function game.set_preset(g, preset_name, num_players)
+function game.set_mode(g, mode_name, num_players)
     local cfg = g.config
-    local preset = cfg.presets[preset_name] or cfg.presets[cfg.default_preset]
-    g.current_preset = preset
-    g.preset_name = preset.name
+    local formation = cfg.formations[mode_name] or cfg.formations[cfg.default_mode]
+    mode_name = cfg.formations[mode_name] and mode_name or cfg.default_mode
+    g.formation = formation
+    g.mode_name = mode_name
+    g.team_capacity = formation.capacity
 
     -- 1. Geometria do campo
-    g.field = field_mod.new(preset)
+    g.field = field_mod.new(cfg.field)
 
     -- 2. Bola no centro do campo
-    g.ball = ball_mod.new(cfg, g.field.cx, g.field.cy)
+    g.ball = ball_mod.new(cfg, 0, 0)
 
     -- 3. Inicialização dos Jogadores e Comandos Pré-Alocados
-    num_players = num_players or #cfg.players
+    num_players = math.min(num_players or #cfg.players, #cfg.players, formation.capacity * 2)
     g.players = {}
     g.commands = {}
 
@@ -70,14 +72,14 @@ function game.set_preset(g, preset_name, num_players)
 
         if p_data.team == "red" then
             red_count = red_count + 1
-            local sp = preset.spawns.red[red_count] or preset.spawns.red[#preset.spawns.red]
-            spawn_x = g.field.cx + sp.x
-            spawn_y = g.field.cy + sp.y
+            local sp = formation.red[red_count]
+            spawn_x = sp.x
+            spawn_y = sp.y
         else
             blue_count = blue_count + 1
-            local sp = preset.spawns.blue[blue_count] or preset.spawns.blue[#preset.spawns.blue]
-            spawn_x = g.field.cx + sp.x
-            spawn_y = g.field.cy + sp.y
+            local sp = formation.blue[blue_count]
+            spawn_x = sp.x
+            spawn_y = sp.y
         end
 
         g.players[i] = player_mod.new(p_data, cfg, spawn_x, spawn_y)
@@ -94,12 +96,6 @@ function game.set_preset(g, preset_name, num_players)
         end
     end
     g.num_player_pairs = pair_idx
-
-    -- 5. Barreiras de gol exclusivas para jogadores
-    g.player_goal_barriers = {
-        { x1 = g.field.left,  y1 = g.field.goal_top, x2 = g.field.left,  y2 = g.field.goal_bottom, nx = 1,  ny = 0 },
-        { x1 = g.field.right, y1 = g.field.goal_top, x2 = g.field.right, y2 = g.field.goal_bottom, nx = -1, ny = 0 },
-    }
 
     g:reset_positions()
 end
@@ -191,17 +187,11 @@ function game.step_fixed(g, dt, commands)
         end
     end
 
-    -- 8. Colisões dos jogadores com paredes do campo e barreiras de gol
-    for i = 1, 6 do
-        local wall = f.walls[i]
+    -- 8. Jogadores podem sair das linhas, mas ficam contidos pelas quatro paredes externas.
+    for i = 1, #f.outer_walls do
+        local wall = f.outer_walls[i]
         for j = 1, num_p do
             physics.resolve_circle_segment(players[j], wall, 0.1)
-        end
-    end
-    for i = 1, #g.player_goal_barriers do
-        local barrier = g.player_goal_barriers[i]
-        for j = 1, num_p do
-            physics.resolve_circle_segment(players[j], barrier, 0.1)
         end
     end
 
@@ -309,12 +299,15 @@ function game.update_presentation(g)
     end
 end
 
-function game.draw(g)
+function game.draw(g, show_colliders)
     local colors = g.config.colors
     local cfg = g.config
 
     -- 1. Campo, traves e redes
-    field_mod.draw(g.field, colors)
+    field_mod.draw(g.field, colors, cfg)
+    if show_colliders then
+        field_mod.draw_colliders(g.field, colors, cfg)
+    end
 
     -- 2. Linha de trajetória pontilhada (apenas para o jogador na posse)
     if g.trajectory_count > 0 and g.possessor_player then

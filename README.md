@@ -4,7 +4,7 @@ Jogo de futebol 2D local para até quatro pessoas no mesmo teclado, feito em Lua
 
 ## Como jogar
 
-Abra o jogo e use os controles abaixo. `F2` alterna entre os campos 1v1, 2v2 e 3v3; `R` reinicia a partida e o placar; `Esc` encerra o jogo.
+Abra o jogo e use os controles abaixo. `F2` percorre os modos 1v1, 2v2, 3v3, 4v4 e 5v5 sem mudar a quadra; nesta versão, o teclado controla no máximo quatro jogadores locais. `R` reinicia a partida e o placar; `Esc` encerra o jogo.
 
 | Ação | Jogador 1 (vermelho) | Jogador 2 (azul) | Jogador 3 (vermelho) | Jogador 4 (azul) |
 |---|---|---|---|---|
@@ -14,7 +14,9 @@ Abra o jogo e use os controles abaixo. `F2` alterna entre os campos 1v1, 2v2 e 3
 | Direita | D | Seta para a direita | L | Numpad 6 ou 6 |
 | Chutar | Espaço | Shift direito | U | Numpad 0 ou 0 |
 
-O mouse posiciona o ponto de contato no seletor de efeito no canto inferior direito. Clique em `[C]` ou pressione `C` para centralizá-lo. `F4` alterna o controle de efeito pelo teclado, `F3` mostra/oculta o diagnóstico e `F11` alterna janela e tela cheia.
+O campo RS mede 3000 × 1500 unidades, com paredes externas de contenção 150 unidades além das linhas. O mundo usa (0, 0) no centro da quadra. A janela mostra provisoriamente a arena inteira; a câmera RS será implementada na Fase 2. `F4` mostra/oculta os colisores reais (paredes externas em vermelho, traves em amarelo e redes em ciano); `F3` mostra/oculta o diagnóstico e `F11` alterna janela e tela cheia.
+
+O mouse posiciona o ponto de contato no seletor de efeito no canto inferior direito. Clique em `[C]` ou pressione `C` para centralizá-lo.
 
 ## Rodar o código
 

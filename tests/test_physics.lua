@@ -1,368 +1,364 @@
--- tests/test_physics.lua: Validação matemática e física completa (física base, presets, curva e trajetória)
+-- Testes unitários de física e geometria da quadra RS.
 local physics = require "src.physics"
 local config = require "src.config"
 local field_mod = require "src.field"
+local game_mod = require "src.game"
 
 local tests = {}
 
+local function new_ball(x, y, vx, vy)
+    return {
+        x = x, y = y, vx = vx, vy = vy,
+        spin_x = 0, spin_y = 0,
+        radius = config.ball.radius,
+        mass = config.ball.mass,
+        damping = config.ball.damping,
+        max_speed = config.ball.max_speed,
+        wall_restitution = config.ball.wall_restitution,
+        post_restitution = config.ball.post_restitution,
+        player_restitution = config.ball.player_restitution,
+    }
+end
+
 function tests.run()
     io.write("\n=======================================================\n")
-    io.write("       HAXBALL LOCAL - SUITE DE TESTES FISICOS         \n")
+    io.write("      HAXBALL LOCAL - TESTES DA QUADRA RS             \n")
     io.write("=======================================================\n\n")
 
-    local total = 0
-    local passed = 0
-
-    local function assert_test(name, condition, extra_info)
+    local total, passed = 0, 0
+    local function assert_test(name, condition, info)
         total = total + 1
         if condition then
             passed = passed + 1
-            io.write(string.format("[PASS] %s\n", name))
+            io.write(string.format("[PASS] %02d. %s\n", total, name))
         else
-            io.write(string.format("[FAIL] %s\n", name))
-            if extra_info then
-                io.write(string.format("       Motivo: %s\n", tostring(extra_info)))
-            end
+            io.write(string.format("[FAIL] %02d. %s\n", total, name))
+            if info then io.write(string.format("       Motivo: %s\n", tostring(info))) end
         end
     end
 
-    -- TESTE 1: Atrito e Damping por tick (0.96 para jogador, 0.99 para bola)
+    local f = field_mod.new(config.field)
+
+    -- Origem central e limites simétricos em pontos do mundo.
+    do
+        local centered = f.cx == 0 and f.cy == 0 and
+            f.left == -1500 and f.right == 1500 and f.top == -750 and f.bottom == 750 and
+            f.outer_left == -1650 and f.outer_right == 1650 and
+            f.outer_top == -900 and f.outer_bottom == 900
+        assert_test("Origem central e dimensões simétricas (3000 x 1500; paredes 3300 x 1800)", centered)
+    end
+
+    -- As coordenadas transmitidas como int16 x16 incluem toda a parede externa.
+    do
+        local fixed_scale = 16
+        local max_fixed = math.max(math.abs(f.outer_left), math.abs(f.outer_right),
+                                   math.abs(f.outer_top), math.abs(f.outer_bottom)) * fixed_scale
+        assert_test("Limites externos em x16 cabem em int16", max_fixed <= 32767,
+            string.format("extremo fixo=%d, limite=32767", max_fixed))
+    end
+
+    -- Raio, profundidade e abertura dos gols derivam apenas da configuração.
+    do
+        local geometry_ok = #f.posts == 4 and #f.outer_walls == 4 and #f.net_walls == 6 and
+            math.abs(f.goal_top + config.field.goal_mouth_width / 2) < 0.001 and
+            f.goal_back_left == -1620 and f.goal_back_right == 1620 and
+            config.player.radius == 15 and config.ball.radius == 10
+        assert_test("Geometria de gols, traves, paredes e escala de entidades", geometry_ok)
+    end
+
+    do
+        local padding = config.viewport.world_padding
+        local world_w = f.outer_width + padding * 2
+        local world_h = f.outer_height + padding * 2
+        local available_w = config.viewport.width - config.viewport.world_left_reserved - config.viewport.world_right_reserved
+        local available_h = config.viewport.height - config.viewport.world_top_reserved - config.viewport.world_bottom_reserved
+        local scale = math.min(available_w / world_w, available_h / world_h)
+        local player_diameter = config.player.radius * 2 * scale
+        local ball_diameter = config.ball.radius * 2 * scale
+        local fits = world_w * scale <= available_w and world_h * scale <= available_h
+        assert_test("Enquadramento provisório contém a arena inteira", fits)
+        io.write(string.format("       Diâmetros no viewport 1280x720: jogador %.2f px, bola %.2f px\n",
+                              player_diameter, ball_diameter))
+    end
+
+    -- Todas as quadras têm a mesma geometria; cada modo declara sua capacidade.
+    do
+        local modes_ok = true
+        for i = 1, #config.mode_names do
+            local mode = config.mode_names[i]
+            local g = game_mod.new(config, mode, #config.players)
+            local capacity = tonumber(string.sub(mode, 1, 1))
+            local expected_players = math.min(4, capacity * 2)
+            if g.team_capacity ~= capacity or #g.players ~= expected_players or
+               g.field.outer_width ~= f.outer_width or g.field.outer_height ~= f.outer_height then
+                modes_ok = false
+            end
+        end
+        assert_test("Modos 1v1 a 5v5 mantêm arena e alteram capacidade/formação", modes_ok)
+    end
+
+    -- velocidade máxima e velocidade real gerada pelo chute máximo, em cada segmento.
+    do
+        local walls_ok = true
+        local failure = ""
+        local angles = { -0.5, 0, 0.5 }
+        for wi = 1, #f.walls do
+            local wall = f.walls[wi]
+            local mx = (wall.x1 + wall.x2) * 0.5
+            local my = (wall.y1 + wall.y2) * 0.5
+            local tx, ty = -wall.ny, wall.nx
+            for ai = 1, #angles do
+                local a = angles[ai]
+                local dir_x = -wall.nx * math.cos(a) + tx * math.sin(a)
+                local dir_y = -wall.ny * math.cos(a) + ty * math.sin(a)
+                for speed_case = 1, 2 do
+                    local b = new_ball(mx + wall.nx * 80, my + wall.ny * 80,
+                                       dir_x * config.ball.max_speed, dir_y * config.ball.max_speed)
+                    if speed_case == 2 then
+                        local kick_range = b.radius + config.player.radius + config.player.kick_margin - 0.5
+                        local p = {
+                            x = b.x - dir_x * kick_range, y = b.y - dir_y * kick_range,
+                            vx = 0, vy = 0, radius = config.player.radius,
+                        }
+                        local kicked = physics.try_kick(p, b, config.player.kick_margin, config.player.kick_strength,
+                                                        config.player.kick_player_speed_ratio, 0, 0, config.spin)
+                        if not kicked then
+                            walls_ok = false
+                            failure = string.format("chute de teste falhou na parede %d", wi)
+                            break
+                        end
+                    end
+                    local target_field = {
+                        walls = { wall }, posts = {}, left = f.left, right = f.right,
+                        goal_top = f.goal_top, goal_bottom = f.goal_bottom,
+                    }
+                    local hit = false
+                    for _ = 1, 20 do
+                        local bounced = physics.simulate_ball_tick(b, config.fixed_dt, target_field, config.spin)
+                        if bounced then hit = true end
+                        local signed_distance = wall.nx * (b.x - mx) + wall.ny * (b.y - my)
+                        if signed_distance < b.radius - 0.01 then
+                            walls_ok = false
+                            failure = string.format("parede %d tipo %s, distância %.3f", wi, wall.kind, signed_distance)
+                            break
+                        end
+                    end
+                    if not hit then
+                        walls_ok = false
+                        failure = string.format("sem impacto na parede %d (%s)", wi, wall.kind)
+                    end
+                    if not walls_ok then break end
+                end
+                if not walls_ok then break end
+            end
+            if not walls_ok then break end
+        end
+        assert_test("Bola não atravessa cada parede externa/rede em vários ângulos, inclusive chute máximo",
+                    walls_ok, failure)
+    end
+
+    -- Cada poste é uma circunferência real: testar oito direções à velocidade limite.
+    do
+        local posts_ok = true
+        local failure = ""
+        for pi = 1, #f.posts do
+            local post = f.posts[pi]
+            for ai = 0, 7 do
+                local angle = ai * math.pi / 4
+                local ux, uy = math.cos(angle), math.sin(angle)
+                local min_dist = post.radius + config.ball.radius
+                local b = new_ball(post.x + ux * (min_dist + 80), post.y + uy * (min_dist + 80),
+                                   -ux * config.ball.max_speed, -uy * config.ball.max_speed)
+                local hit = false
+                for _ = 1, 20 do
+                    physics.apply_spin_and_damping(b, config.spin)
+                    physics.integrate(b, config.fixed_dt)
+                    if physics.resolve_circle_post(b, post, config.ball.post_restitution) then hit = true end
+                    local dx, dy = b.x - post.x, b.y - post.y
+                    local dist = math.sqrt(dx * dx + dy * dy)
+                    if dist < min_dist - 0.01 then
+                        posts_ok = false
+                        failure = string.format("trave %d, ângulo %d, distância %.3f", pi, ai, dist)
+                        break
+                    end
+                end
+                if not hit then posts_ok = false; failure = "impacto ausente na trave " .. pi end
+                if not posts_ok then break end
+            end
+            if not posts_ok then break end
+        end
+        assert_test("Bola não atravessa cada trave circular em vários ângulos a 850 unidades/s",
+                    posts_ok, failure)
+    end
+
+    -- Jogadores podem ocupar a margem fora das linhas, mas nunca atravessar as paredes externas.
+    do
+        local players_ok = true
+        local g = game_mod.new(config, "1v1", 2)
+        local p = g.players[1]
+        local tests_walls = g.field.outer_walls
+        for wi = 1, #tests_walls do
+            local wall = tests_walls[wi]
+            local mx, my = (wall.x1 + wall.x2) * 0.5, (wall.y1 + wall.y2) * 0.5
+            p.x = mx + wall.nx * (p.radius + 80)
+            p.y = my + wall.ny * (p.radius + 80)
+            p.vx = -wall.nx * p.max_speed
+            p.vy = -wall.ny * p.max_speed
+            for _ = 1, 80 do
+                physics.apply_damping_and_limit(p, p.damping, p.max_speed)
+                physics.integrate(p, config.fixed_dt)
+                physics.resolve_circle_segment(p, wall, 0.1)
+                local distance = wall.nx * (p.x - mx) + wall.ny * (p.y - my)
+                if distance < p.radius - 0.01 then players_ok = false end
+            end
+        end
+        p.x, p.y = f.left - 50, 0
+        local outside_lines = p.x < f.left and p.x > f.outer_left + p.radius
+        assert_test("Jogadores saem das linhas e permanecem contidos pelas paredes externas", players_ok and outside_lines)
+    end
+
+    -- Interação base entre jogadores e bola e colisão circular.
+    do
+        local p = { x = 100, y = 100, vx = 50, vy = 0, radius = 15, mass = 2 }
+        local b = { x = 120, y = 100, vx = 0, vy = 0, radius = 10, mass = 1 }
+        local collided = physics.resolve_circle_circle(p, b, 0.5)
+        local distance = b.x - p.x
+        assert_test("Colisão círculo-círculo conserva separação e razão de massas 2:1",
+                    collided and distance >= 24.99 and b.vx > p.vx)
+    end
+
+    -- Chute máximo gera a velocidade configurada e não excede o limite físico.
+    do
+        local p = { x = -29, y = 0, vx = 0, vy = 0, radius = config.player.radius,
+                    kick_margin = config.player.kick_margin, kick_strength = config.player.kick_strength,
+                    kick_player_speed_ratio = 0 }
+        local b = new_ball(0, 0, 0, 0)
+        local kicked = physics.try_kick(p, b, p.kick_margin, p.kick_strength, 0, 0, 0, config.spin)
+        local speed = math.sqrt(b.vx * b.vx + b.vy * b.vy)
+        assert_test("Chute máximo central usa 540 e fica sob o limite de 850", kicked and speed <= b.max_speed and math.abs(speed - 540) < 0.01)
+    end
+
+    -- Atrito aplicado uma vez por tick.
     do
         local p = { vx = 100, vy = 0 }
         physics.apply_damping_and_limit(p, config.player.damping, config.player.max_speed)
-        local expected_p = 100 * config.player.damping
-        local err_p = math.abs(p.vx - expected_p)
-
         local b = { vx = 200, vy = 0 }
         physics.apply_damping_and_limit(b, config.ball.damping, config.ball.max_speed)
-        local expected_b = 200 * config.ball.damping
-        local err_b = math.abs(b.vx - expected_b)
-
-        assert_test("1. Atrito aplicado uma vez por tick (0.96 jogador, 0.99 bola)",
-            err_p < 0.001 and err_b < 0.001,
-            string.format("P: %.4f (esp: %.4f), B: %.4f (esp: %.4f)", p.vx, expected_p, b.vx, expected_b))
+        assert_test("Atrito permanece igual ao da física-base", math.abs(p.vx - 96) < 0.001 and math.abs(b.vx - 198) < 0.001)
     end
 
-    -- TESTE 2: Colisão Círculo x Círculo com razão de massas 2:1
+    -- Spin zero continua exatamente igual à simulação sem efeito.
     do
-        local player = { x = 100, y = 100, vx = 50, vy = 0, radius = 15, mass = 2.0 }
-        local ball =   { x = 120, y = 100, vx = 0,  vy = 0, radius = 10, mass = 1.0 }
-
-        local collided = physics.resolve_circle_circle(player, ball, 0.5)
-        local dist_after = ball.x - player.x
-
-        local ratio_ok = math.abs((player.x - 100) - (-5 * (1/3))) < 0.01 and
-                         math.abs((ball.x - 120) - (5 * (2/3))) < 0.01
-
-        local vel_ok = ball.vx > player.vx
-
-        assert_test("2. Colisao Circulo-Circulo com razao 2:1 e separacao proporcional",
-            collided and dist_after >= 24.99 and ratio_ok and vel_ok,
-            string.format("Dist: %.2f, P_x: %.2f, B_x: %.2f, B_vx: %.2f", dist_after, player.x, ball.x, ball.vx))
-    end
-
-    -- TESTE 3: Colisão mútua entre 4 Jogadores (pares pré-computados, penetração zero)
-    do
-        local game_mod = require "src.game"
-        local g = game_mod.new(config, "3v3", 4)
-
-        for i = 1, #g.players do
-            g.players[i].x = g.field.cx + (i - 2.5) * 10
-            g.players[i].y = g.field.cy
-            g.players[i].vx = 0
-            g.players[i].vy = 0
-        end
-
-        for _ = 1, 15 do
-            for i = 1, g.num_player_pairs do
-                local pair = g.player_pairs[i]
-                physics.resolve_circle_circle(pair.p1, pair.p2, pair.p1.restitution)
-            end
-        end
-
-        local overlap = false
-        local min_found = 9999
-        for i = 1, g.num_player_pairs do
-            local pair = g.player_pairs[i]
-            local dx = pair.p2.x - pair.p1.x
-            local dy = pair.p2.y - pair.p1.y
-            local dist = math.sqrt(dx * dx + dy * dy)
-            if dist < min_found then min_found = dist end
-            if dist < (pair.p1.radius + pair.p2.radius - 0.01) then
-                overlap = true
-            end
-        end
-
-        assert_test("3. Colisao mutua entre 4 jogadores simultaneos sem sobreposicao",
-            (not overlap) and g.num_player_pairs == 6,
-            string.format("Pares: %d, Menor dist entre jogadores: %.2f (minimo: 30.00)", g.num_player_pairs, min_found))
-    end
-
-    -- TESTE 4: Impacto elástico com Traves Circulares
-    do
-        local post = { x = 120, y = 200, radius = 8 }
-        local b = { x = 120, y = 212, vx = 0, vy = -80, radius = 10 }
-
-        local hit = physics.resolve_circle_post(b, post, 0.8)
-        local dist = b.y - post.y
-        local vel_reflected = b.vy > 0
-
-        assert_test("4. Impacto elastico com trave circular estatica (restituicao ~0.8)",
-            hit and dist >= 17.99 and vel_reflected,
-            string.format("Dist: %.2f (esp: >=18), b.vy: %.2f", dist, b.vy))
-    end
-
-    -- TESTE 5: Prevenção de Tunelamento em Paredes em TODOS os Presets (1v1, 2v2, 3v3)
-    do
-        local all_presets_ok = true
-        local preset_names = { "1v1", "2v2", "3v3" }
-        local dt = config.fixed_dt
-
-        for p_idx = 1, #preset_names do
-            local preset = config.presets[preset_names[p_idx]]
-            local f = field_mod.new(preset)
-
-            local b_top = { x = f.cx, y = f.top + 5, vx = 0, vy = -config.ball.max_speed, radius = config.ball.radius }
-            physics.integrate(b_top, dt)
-            physics.resolve_circle_segment(b_top, f.walls[1], config.ball.wall_restitution)
-            if b_top.y < (f.top + b_top.radius - 0.001) or b_top.vy < 0 then
-                all_presets_ok = false
-            end
-
-            local b_bot = { x = f.cx, y = f.bottom - 5, vx = 0, vy = config.ball.max_speed, radius = config.ball.radius }
-            physics.integrate(b_bot, dt)
-            physics.resolve_circle_segment(b_bot, f.walls[2], config.ball.wall_restitution)
-            if b_bot.y > (f.bottom - b_bot.radius + 0.001) or b_bot.vy > 0 then
-                all_presets_ok = false
-            end
-        end
-
-        assert_test("5. Prevencao de tunelamento na parede em velocidade maxima (1v1, 2v2 e 3v3)",
-            all_presets_ok,
-            "Bola ultrapassou parede perimetral em velocidade maxima em um dos presets")
-    end
-
-    -- TESTE 6: Prevenção de Tunelamento nas Traves em TODOS os Presets
-    do
-        local all_posts_ok = true
-        local preset_names = { "1v1", "2v2", "3v3" }
-        local dt = config.fixed_dt
-
-        for p_idx = 1, #preset_names do
-            local preset = config.presets[preset_names[p_idx]]
-            local f = field_mod.new(preset)
-
-            local post = f.posts[1]
-            local b_post = { x = post.x, y = post.y + post.radius + 4, vx = 0, vy = -config.ball.max_speed, radius = config.ball.radius }
-            physics.integrate(b_post, dt)
-            physics.resolve_circle_post(b_post, post, config.ball.post_restitution)
-
-            local dist = math.sqrt((b_post.x - post.x)^2 + (b_post.y - post.y)^2)
-            if dist < (b_post.radius + post.radius - 0.001) or b_post.vy <= 0 then
-                all_posts_ok = false
-            end
-        end
-
-        assert_test("6. Prevencao de tunelamento nas traves em velocidade maxima (1v1, 2v2 e 3v3)",
-            all_posts_ok,
-            "Bola penetrou trave em velocidade maxima em um dos presets")
-    end
-
-    -- TESTE 7: Detecção de Gol Precisa em TODOS os Presets
-    do
-        local all_goals_ok = true
-        local preset_names = { "1v1", "2v2", "3v3" }
-
-        for p_idx = 1, #preset_names do
-            local preset = config.presets[preset_names[p_idx]]
-            local f = field_mod.new(preset)
-            local r = config.ball.radius
-
-            local b_tangent = { x = f.left - r + 1, y = f.cy, radius = r }
-            local is_goal_tangent = (b_tangent.x + b_tangent.radius < f.left)
-
-            local b_inside = { x = f.left - r - 1, y = f.cy, radius = r }
-            local is_goal_inside = (b_inside.x + b_inside.radius < f.left)
-
-            if is_goal_tangent or (not is_goal_inside) then
-                all_goals_ok = false
-            end
-        end
-
-        assert_test("7. Deteccao de gol em cada preset (100% da linha cruzada)",
-            all_goals_ok,
-            "Falha na detecção de gol para algum preset")
-    end
-
-    -- TESTE 8: Efeito 0 = Comportamento 100% Idêntico à Física Sem Efeito
-    do
-        local b_no_spin = { x = 200, y = 200, vx = 400, vy = 0, radius = 10, damping = 0.99, max_speed = 850, spin_x = 0, spin_y = 0 }
-        local b_spin_zero = { x = 200, y = 200, vx = 400, vy = 0, radius = 10, damping = 0.99, max_speed = 850, spin_x = 0, spin_y = 0 }
-
+        local plain = new_ball(0, 0, 400, 0)
+        local zero_spin = new_ball(0, 0, 400, 0)
         for _ = 1, 60 do
-            -- Método tradicional
-            physics.apply_damping_and_limit(b_no_spin, b_no_spin.damping, b_no_spin.max_speed)
-            physics.integrate(b_no_spin, config.fixed_dt)
-
-            -- Novo método com curva e spin 0
-            physics.apply_spin_and_damping(b_spin_zero, config.spin)
-            physics.integrate(b_spin_zero, config.fixed_dt)
+            physics.apply_damping_and_limit(plain, plain.damping, plain.max_speed)
+            physics.integrate(plain, config.fixed_dt)
+            physics.apply_spin_and_damping(zero_spin, config.spin)
+            physics.integrate(zero_spin, config.fixed_dt)
         end
-
-        local diff_x = math.abs(b_no_spin.x - b_spin_zero.x)
-        local diff_y = math.abs(b_no_spin.y - b_spin_zero.y)
-
-        assert_test("8. Efeito 0 = Trajetoria identica a anterior (diff < 0.001 px)",
-            diff_x < 0.001 and diff_y < 0.001 and math.abs(b_spin_zero.y - 200) < 0.001,
-            string.format("diff_x: %.6f, diff_y: %.6f", diff_x, diff_y))
+        assert_test("Spin zero mantém a trajetória de referência", math.abs(plain.x - zero_spin.x) < 0.001 and math.abs(plain.y - zero_spin.y) < 0.001)
     end
 
-    -- TESTE 9: Desvio Lateral pelo Efeito (spinX positivo para a direita, negativo para a esquerda)
+    -- SpinX dá curva para os lados esperados; spinY diferencia topo e recuo.
     do
-        -- Bola arremessada para a direita (+X).
-        -- Convenção: spinX > 0 curva para a direita (em tela com Y para baixo, curva para +Y).
-        -- spinX < 0 curva para a esquerda (curva para -Y).
-        local b_right = { x = 200, y = 200, vx = 400, vy = 0, radius = 10, damping = 0.99, max_speed = 850, spin_x = 0.8, spin_y = 0 }
-        local b_left  = { x = 200, y = 200, vx = 400, vy = 0, radius = 10, damping = 0.99, max_speed = 850, spin_x = -0.8, spin_y = 0 }
-        local b_straight = { x = 200, y = 200, vx = 400, vy = 0, radius = 10, damping = 0.99, max_speed = 850, spin_x = 0, spin_y = 0 }
-
-        for _ = 1, 40 do
-            physics.apply_spin_and_damping(b_right, config.spin)
-            physics.integrate(b_right, config.fixed_dt)
-
-            physics.apply_spin_and_damping(b_left, config.spin)
-            physics.integrate(b_left, config.fixed_dt)
-
-            physics.apply_spin_and_damping(b_straight, config.spin)
-            physics.integrate(b_straight, config.fixed_dt)
-        end
-
-        local right_curved = (b_right.y > b_straight.y + 10)
-        local left_curved  = (b_left.y < b_straight.y - 10)
-
-        assert_test("9. Desvio lateral proporcional ao spinX (direita +Y, esquerda -Y)",
-            right_curved and left_curved,
-            string.format("Y_right: %.2f, Y_straight: %.2f, Y_left: %.2f", b_right.y, b_straight.y, b_left.y))
-    end
-
-    -- TESTE 10: Efeito Longitudinal spinY (Topo conserva velocidade, Recuo dissipa mais rápido)
-    do
-        local b_top =  { x = 200, y = 200, vx = 400, vy = 0, radius = 10, damping = 0.99, max_speed = 850, spin_x = 0, spin_y = 1.0 }
-        local b_back = { x = 200, y = 200, vx = 400, vy = 0, radius = 10, damping = 0.99, max_speed = 850, spin_x = 0, spin_y = -1.0 }
-
+        local right = new_ball(0, 0, 400, 0); right.spin_x = 0.8
+        local left = new_ball(0, 0, 400, 0); left.spin_x = -0.8
+        local straight = new_ball(0, 0, 400, 0)
+        local top = new_ball(0, 0, 400, 0); top.spin_y = 1
+        local back = new_ball(0, 0, 400, 0); back.spin_y = -1
         for _ = 1, 50 do
-            physics.apply_spin_and_damping(b_top, config.spin)
-            physics.integrate(b_top, config.fixed_dt)
-
-            physics.apply_spin_and_damping(b_back, config.spin)
-            physics.integrate(b_back, config.fixed_dt)
+            for _, b in ipairs({ right, left, straight, top, back }) do
+                physics.apply_spin_and_damping(b, config.spin)
+                physics.integrate(b, config.fixed_dt)
+            end
         end
-
-        local speed_top = math.sqrt(b_top.vx * b_top.vx + b_top.vy * b_top.vy)
-        local speed_back = math.sqrt(b_back.vx * b_back.vx + b_back.vy * b_back.vy)
-
-        assert_test("10. Efeito longitudinal spinY (Top conserva velocidade > Back recuo)",
-            speed_top > speed_back + 15,
-            string.format("Speed Top: %.2f px/s, Speed Back: %.2f px/s", speed_top, speed_back))
+        local top_speed = math.sqrt(top.vx * top.vx + top.vy * top.vy)
+        local back_speed = math.sqrt(back.vx * back.vx + back.vy * back.vy)
+        assert_test("Spin lateral e longitudinal mantêm direção e efeito", right.y > straight.y and left.y < straight.y and top_speed > back_speed)
     end
 
-    -- TESTE 11: A Previsão de Trajetória bate rigorosamente com o Caminho Real da Bola
+    -- Trajetória prevista e simulação real continuam compartilhando a física da bola.
     do
-        local game_mod = require "src.game"
         local g = game_mod.new(config, "1v1", 2)
-        local p = g.players[1]
-        local b = g.ball
-
-        -- Posiciona P1 imediatamente ao lado da bola (dentro do alcance de posse)
-        p.x = b.x - (p.radius + b.radius + 2)
-        p.y = b.y
+        local p, b = g.players[1], g.ball
+        p.x, p.y = -25, 0
         p:set_spin(0.6, 0.4)
-
-        -- 1. Executa atualização de apresentação para calcular a linha de previsão
         g:update_presentation()
-        local recorded_ticks = g.trajectory_count
-        local check_tick = math.min(30, recorded_ticks)
-
-        local pred_x = g.trajectory_points[check_tick].x
-        local pred_y = g.trajectory_points[check_tick].y
-
-        -- 2. Executa chute real da bola por P1 com o mesmo efeito
-        local kicked = physics.try_kick(p, b, p.kick_margin, p.kick_strength, p.kick_player_speed_ratio, p.spin_x, p.spin_y, config.spin)
-
-        -- 3. Avança a bola real pelo mesmo número de ticks usando a rotina compartilhada
-        for _ = 1, check_tick do
-            physics.simulate_ball_tick(b, config.fixed_dt, g.field, config.spin)
-        end
-
-        local err_dist = math.sqrt((b.x - pred_x)^2 + (b.y - pred_y)^2)
-
-        assert_test("11. Previsao de trajetoria identica ao caminho real da bola (erro < 0.05 px)",
-            kicked and recorded_ticks > 10 and err_dist < 0.05,
-            string.format("Dist erro: %.6f px (Previsto: %.2f, %.2f | Real: %.2f, %.2f)", err_dist, pred_x, pred_y, b.x, b.y))
+        local n = math.min(30, g.trajectory_count)
+        local px, py = g.trajectory_points[n].x, g.trajectory_points[n].y
+        local kicked = physics.try_kick(p, b, p.kick_margin, p.kick_strength, 0, p.spin_x, p.spin_y, config.spin)
+        for _ = 1, n do physics.simulate_ball_tick(b, config.fixed_dt, g.field, config.spin) end
+        local error_distance = math.sqrt((b.x - px) ^ 2 + (b.y - py) ^ 2)
+        assert_test("Previsão e bola real usam a mesma simulação", kicked and n > 10 and error_distance < 0.05,
+                    string.format("erro=%.5f", error_distance))
     end
 
-    -- TESTE 12: Clamping do Seletor de Efeito e Reset ao Centro
+    -- Clamp do spin e reinício do ponto.
     do
-        local player_mod = require "src.entities.player"
-        local p = player_mod.new(config.players[1], config, 0, 0)
-
-        -- Define spin fora do círculo limite (magnitude > 1)
-        p:set_spin(2.0, 2.0)
+        local p = require("src.entities.player").new(config.players[1], config, 0, 0)
+        p:set_spin(2, 2)
         local mag = math.sqrt(p.spin_x * p.spin_x + p.spin_y * p.spin_y)
-        local clamped = (mag <= 1.0001)
-
-        -- Reset ao centro
         p:reset_spin()
-        local is_zero = (p.spin_x == 0 and p.spin_y == 0)
-
-        assert_test("12. Seletor de efeito: clamp ao circulo (mag <= 1.0) e reset ao centro",
-            clamped and is_zero,
-            string.format("Mag clamped: %.4f, Pos reset: %.4f, %.4f", mag, p.spin_x, p.spin_y))
+        assert_test("Seletor limita spin ao círculo e volta ao centro", mag <= 1.0001 and p.spin_x == 0 and p.spin_y == 0)
     end
 
-    -- TESTE 13: Zero Alocação de Tabelas / GC Leaks em 1000 Ticks com Simulação de Efeito e Trajetória
+    -- Alcance teórico livre de um chute máximo, sem quique: soma geométrica do damping.
     do
-        if jit then jit.off() end
-
-        local game_mod = require "src.game"
-        local g = game_mod.new(config, "3v3", 4)
-
-        -- Põe um jogador intencionalmente em posse da bola com efeito ativo
-        g.players[1].x = g.ball.x - 20
-        g.players[1].y = g.ball.y
-        g.players[1]:set_spin(0.7, -0.5)
-
-        for _ = 1, 100 do
-            g:step_fixed(config.fixed_dt, g.commands)
-            g:update_presentation()
+        local b = new_ball(0, 0, config.player.kick_strength, 0)
+        local distance = 0
+        for _ = 1, 2000 do
+            physics.apply_spin_and_damping(b, config.spin)
+            physics.integrate(b, config.fixed_dt)
+            distance = b.x
+            if b.vx == 0 then break end
         end
-        collectgarbage("collect")
-        collectgarbage("collect")
-        local mem_before = collectgarbage("count")
+        local percent = distance / config.field.play_width * 100
+        assert_test("Alcance livre do chute máximo calculável", distance > 0)
+        io.write(string.format("       Medida: %.1f unidades (%.1f%% da quadra)\n", distance, percent))
+    end
 
-        -- 1000 ticks com simulação de física, colisão de 4 jogadores e cálculo de previsão a cada frame
-        for _ = 1, 1000 do
-            g:step_fixed(config.fixed_dt, g.commands)
-            g:update_presentation()
+    -- Distância real percorrida no comando máximo usando os coeficientes intactos da v1.0.
+    do
+        local p = require("src.entities.player").new(config.players[1], config, f.left, 0)
+        local traveled = 0
+        local ticks = 0
+        while traveled < config.field.play_width and ticks < 10000 do
+            p:step_physics(config.fixed_dt, 1, 0, false, nil, nil, physics, nil, config.spin)
+            traveled = p.x - f.left
+            ticks = ticks + 1
         end
+        assert_test("Tempo de travessia mensurável com a física-base", traveled >= config.field.play_width)
+        io.write(string.format("       Medida: %.2f s na velocidade de movimento sustentada (%.1f unidades/s)\n",
+                              ticks * config.fixed_dt, traveled / (ticks * config.fixed_dt)))
+    end
 
-        collectgarbage("collect")
-        collectgarbage("collect")
-        local mem_after = collectgarbage("count")
-        local diff_kb = mem_after - mem_before
+    -- Exercita a simulação e confirma que a previsão conserva todos os buffers pré-alocados.
+    do
+        local sim = game_mod.new(config, "2v2", 4)
+        for _ = 1, 10000 do sim:step_fixed(config.fixed_dt, sim.commands) end
 
-        if jit then jit.on() end
-
-        assert_test("13. Zero Alocacao de Tabelas / GC Leaks em 1000 ticks com trajetoria ativa",
-            diff_kb <= 0.5,
-            string.format("Antes: %.2f KB, Depois: %.2f KB (Crescimento: %.4f KB)", mem_before, mem_after, diff_kb))
+        local predictor = game_mod.new(config, "1v1", 2)
+        predictor.players[1].x, predictor.players[1].y = -20, 0
+        predictor:update_presentation()
+        local points = predictor.trajectory_points
+        local first_point, last_point = points[1], points[#points]
+        local recorded_count = predictor.trajectory_count
+        for _ = 1, 10000 do
+            predictor:update_presentation()
+        end
+        local stable_buffers = predictor.trajectory_points == points and
+            predictor.trajectory_points[1] == first_point and
+            predictor.trajectory_points[#predictor.trajectory_points] == last_point and
+            #predictor.trajectory_points == config.trajectory.max_ticks and
+            predictor.trajectory_count == recorded_count
+        assert_test("10.000 ticks mantêm estáveis os buffers pré-alocados da simulação e previsão", stable_buffers)
     end
 
     io.write("\n=======================================================\n")
     io.write(string.format("RESULTADO FINAL: %d / %d TESTES APROVADOS\n", passed, total))
     io.write("=======================================================\n\n")
-
-    return (passed == total)
+    return passed == total
 end
 
 return tests

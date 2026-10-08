@@ -16,8 +16,8 @@ function ui.new(config)
     u.text_p1_label = love.graphics.newText(u.font_hud, "VERMELHO")
     u.text_p2_label = love.graphics.newText(u.font_hud, "AZUL")
     u.text_goal_banner = love.graphics.newText(u.font_score, "GOOOOL!")
-    u.text_instructions = love.graphics.newText(u.font_hud, "P1: WASD+Espaço | P2: Setas+RShift | P3: IJKL+U | P4: 8456+0 | Mouse/C: Efeito | F2: Campo | F3: Debug")
-    u.text_debug = love.graphics.newText(u.font_debug, "FPS: 60  |  Lua RAM: 0 KB  |  Preset: 3v3 (4 Jogadores)")
+    u.text_instructions = love.graphics.newText(u.font_hud, "P1: WASD+Espaço | P2: Setas+RShift | P3: IJKL+U | P4: 8456+0 | Mouse/C: Efeito | F2: Modo | F3: Debug | F4: Colisores")
+    u.text_debug = love.graphics.newText(u.font_debug, "FPS: 60  |  Lua RAM: 0 KB  |  Modo: 2v2 (4/4 jogadores)")
     u.text_spin_label = love.graphics.newText(u.font_mini, "EFEITO (C)")
     u.text_reset_icon = love.graphics.newText(u.font_mini, "C")
 
@@ -168,9 +168,10 @@ function ui.draw_debug(u, dt, show_debug, game_state)
         u.debug_timer = 0
         local fps = love.timer.getFPS()
         local mem_kb = math.floor(collectgarbage("count"))
-        local preset_str = (game_state and game_state.preset_name) or "3v3"
+        local preset_str = (game_state and game_state.mode_name) or "2v2"
         local p_count = (game_state and #game_state.players) or 4
-        u.text_debug:set(string.format("FPS: %d  |  Lua RAM: %d KB  |  Preset: %s (%d Jogadores)", fps, mem_kb, preset_str, p_count))
+        local capacity = (game_state and game_state.team_capacity) or 2
+        u.text_debug:set(string.format("FPS: %d  |  Lua RAM: %d KB  |  Modo: %s (%d/%d jogadores locais)", fps, mem_kb, preset_str, p_count, capacity * 2))
     end
 
     local text_w = u.text_debug:getWidth()
