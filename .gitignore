@@ -1,0 +1,27 @@
+# Builds e ferramentas locais
+dist/
+tools/
+*.love
+*.zip
+*.exe
+
+# Saves locais do LÖVE/jogo
+saves/
+save/
+*.sav
+*.save
+
+# Temporários e arquivos de IDE
+*.tmp
+*.temp
+*.swp
+*.swo
+*.bak
+*~
+.idea/
+.vscode/
+.vs/
+*.iml
+*.code-workspace
+Thumbs.db
+Desktop.ini
