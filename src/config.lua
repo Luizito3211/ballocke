@@ -84,7 +84,36 @@ config.spin_selector = {
 }
 
 config.trajectory = { max_ticks = 120, max_bounces = 2, step_stride = 2 }
-config.game = { goal_reset_delay = 2.0 }
+config.game = { goal_reset_delay = 2.0, halfDuration = 300, testHalfDuration = 60 }
+config.referee = {
+    warmupDuration = 2.0, goalPause = 2.0, intermissionDuration = 5.0,
+    regulationGrace = 15.0, noPlayerAutoRelease = 2.0,
+    restartTimeouts = { lateral = 20, goal_kick = 20, corner = 25, kickoff = 25 },
+    testRestartTimeout = 1.0, restartZoneRadius = 220, cornerMargin = 100,
+    zonePushGain = 3.0, zonePushResponse = 4.0, zonePushSpeed = 220,
+    zoneTargetMargin = 3, restartTouchSeparationPadding = 0.5,
+    zoneFillAlpha = 0.16, zoneLineAlpha = 0.75, zoneLineWidth = 3,
+    frozenRingOffset = 22, frozenRingPulseAmplitude = 5, frozenRingPulseRate = 4,
+    frozenRingLineWidth = 6, frozenRingAlpha = 0.98, frozenRingFillAlpha = 0.28,
+    zoneDirections = 32,
+    firstKickoffTeam = "red",
+    teamName = { red = "VERMELHO", blue = "AZUL" },
+    messages = {
+        warmup = "AQUECIMENTO", goal = "GOL!", halftime = "FIM DO 1º TEMPO",
+        fulltime = "FIM DE JOGO", interval = "INTERVALO",
+        kickoffRed = "SAQUE INICIAL - VERMELHO", kickoffBlue = "SAQUE INICIAL - AZUL",
+        lateralRed = "LATERAL - VERMELHO", lateralBlue = "LATERAL - AZUL",
+        goalKickRed = "TIRO DE META - VERMELHO", goalKickBlue = "TIRO DE META - AZUL",
+        cornerRed = "ESCANTEIO - VERMELHO", cornerBlue = "ESCANTEIO - AZUL",
+    },
+}
+config.testPanel = {
+    key = "f6", playerToBallKey = "f7", saveKey = "s",
+    lateralTop = 1, lateralBottom = 2, endLeft = 3, endRight = 4,
+    lastTouchNone = 1, lastTouchRed = 2, lastTouchBlue = 3,
+    outOffset = 1, playerBallGap = 2,
+}
+config.game.kickOffReset = "full"
 config.camera = {
     viewWidth = 1500, viewWidthDefault = 1500,
     viewWidthMin = 1100, viewWidthMax = 1900, viewWidthStep = 50,
@@ -127,6 +156,8 @@ config.keys = {
     debug_colliders = "f4",
     fullscreen = "f11",
     cycle_mode = "f2",
+    referee_test = "f6",
+    referee_test_player = "f7",
 }
 
 config.colors = {

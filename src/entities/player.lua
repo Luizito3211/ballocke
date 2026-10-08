@@ -84,8 +84,10 @@ function player.step_physics(p, dt, move_x, move_y, kick_pressed, spin_x, spin_y
 
     -- 4. Ação de chute com aplicação do spin atual
     if kick_pressed and ball then
-        physics.try_kick(p, ball, p.kick_margin, p.kick_strength, p.kick_player_speed_ratio, p.spin_x, p.spin_y, spin_config)
+        return physics.try_kick(p, ball, p.kick_margin, p.kick_strength,
+            p.kick_player_speed_ratio, p.spin_x, p.spin_y, spin_config)
     end
+    return false
 end
 
 function player.draw(p, colors, x, y)

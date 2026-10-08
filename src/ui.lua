@@ -20,12 +20,89 @@ function ui.new(config)
     u.text_debug = love.graphics.newText(u.font_debug, "FPS: 60  |  Lua RAM: 0 KB  |  Modo: 2v2 (4/4 jogadores)")
     u.text_spin_label = love.graphics.newText(u.font_mini, "EFEITO (C)")
     u.text_reset_icon = love.graphics.newText(u.font_mini, "C")
+    u.font_ref = love.graphics.newFont(18)
+    u.font_panel = love.graphics.newFont(16)
+    u.text_referee = love.graphics.newText(u.font_ref, "AQUECIMENTO")
+    u.text_clock = love.graphics.newText(u.font_hud, "1º TEMPO  05:00")
+    u.text_restart_clock = love.graphics.newText(u.font_hud, "")
+    u.ref_second = -1
+    u.test_selection = 1
+    u.test_touch = 1
+    u.test_rows = {
+        love.graphics.newText(u.font_panel, "Lateral superior: 1"),
+        love.graphics.newText(u.font_panel, "Lateral inferior: 2"),
+        love.graphics.newText(u.font_panel, "Fundo esquerdo: 3"),
+        love.graphics.newText(u.font_panel, "Fundo direito: 4"),
+        love.graphics.newText(u.font_panel, "Último toque: [Nenhum] Vermelho Azul (←/→)"),
+        love.graphics.newText(u.font_panel, "Tempos curtos: desligado"),
+        love.graphics.newText(u.font_panel, "Duração teste: 5 min"),
+        love.graphics.newText(u.font_panel, "Forçar fim do tempo: Enter"),
+    }
+    u.text_test_help = love.graphics.newText(u.font_hud, "↑/↓ selecionar | ←/→ ajustar | Enter aplicar | F6 fechar | F7 levar jogador à bola")
 
     u.last_score_p1 = -1
     u.last_score_p2 = -1
     u.debug_timer = 0
 
     return setmetatable(u, { __index = ui })
+end
+
+function ui.update_referee(u, r)
+    local sec = math.floor(math.max(0, r.halfRemaining) + 0.999)
+    if sec ~= u.ref_second then
+        u.ref_second = sec
+        local minute, second = math.floor(sec / 60), sec % 60
+        local half = r.half == 1 and "1º TEMPO" or "2º TEMPO"
+        u.text_clock:set(string.format("%s  %02d:%02d", half, minute, second))
+    end
+    local msg = r.message or ""
+    if u.current_ref_message ~= msg then
+        u.current_ref_message = msg
+        u.text_referee:set(msg)
+    end
+    local remaining = math.ceil(math.max(0, r.restartRemaining))
+    if r.restartRemaining > 0 and u.restart_second ~= remaining then
+        u.restart_second = remaining
+        u.text_restart_clock:set("Cobrança: " .. remaining .. " s")
+    elseif r.restartRemaining <= 0 and u.restart_second ~= 0 then
+        u.restart_second = 0
+        u.text_restart_clock:set("")
+    end
+end
+
+function ui.refresh_test_panel(u, short_restarts, one_minute, last_touch)
+    local row = u.test_rows[5]
+    local touch = last_touch == 1 and "[Nenhum] Vermelho Azul" or
+        (last_touch == 2 and "Nenhum [Vermelho] Azul" or "Nenhum Vermelho [Azul]")
+    row:set("Último toque: " .. touch .. " (←/→)")
+    u.test_rows[6]:set("Tempos curtos: " .. (short_restarts and "ligado" or "desligado"))
+    u.test_rows[7]:set("Duração teste: " .. (one_minute and "1 minuto" or "5 minutos"))
+end
+
+function ui.draw_referee(u, virtual_width)
+    love.graphics.setColor(0, 0, 0, 0.6)
+    love.graphics.rectangle("fill", virtual_width / 2 - 220, 70, 440, 64, 6, 6)
+    love.graphics.setColor(1, 1, 1, 1)
+    local w = u.text_referee:getWidth()
+    love.graphics.draw(u.text_referee, virtual_width / 2 - w / 2, 76)
+    love.graphics.draw(u.text_clock, virtual_width / 2 - u.text_clock:getWidth() / 2, 108)
+    if u.text_restart_clock:getWidth() > 0 then
+        love.graphics.draw(u.text_restart_clock, virtual_width / 2 - u.text_restart_clock:getWidth() / 2, 136)
+    end
+end
+
+function ui.draw_test_panel(u, virtual_width, virtual_height)
+    love.graphics.setColor(0, 0, 0, 0.88)
+    love.graphics.rectangle("fill", virtual_width / 2 - 340, virtual_height / 2 - 205, 680, 410, 10, 10)
+    love.graphics.setColor(1, 0.9, 0.3, 1)
+    love.graphics.printf("PAINEL DE TESTE DO ÁRBITRO (TREINO SOLO)", virtual_width / 2 - 320, virtual_height / 2 - 185, 640, "center")
+    for i = 1, #u.test_rows do
+        if i == u.test_selection then love.graphics.setColor(1, 0.9, 0.3, 1)
+        else love.graphics.setColor(0.92, 0.94, 0.97, 1) end
+        love.graphics.draw(u.test_rows[i], virtual_width / 2 - 300, virtual_height / 2 - 145 + (i - 1) * 32)
+    end
+    love.graphics.setColor(0.75, 0.8, 0.85, 1)
+    love.graphics.printf(u.text_test_help, virtual_width / 2 - 320, virtual_height / 2 + 145, 640, "center")
 end
 
 -- Atualiza o texto do placar SOMENTE quando houver alteração de pontos
@@ -184,12 +261,13 @@ function ui.draw_debug(u, dt, show_debug, game_state)
     love.graphics.draw(u.text_debug, 18, 14)
 end
 
-function ui.draw_ball_arrow(u, x, y, dx, dy)
+function ui.draw_ball_arrow(u, x, y, dx, dy, tint)
     local length = math.sqrt(dx * dx + dy * dy)
     if length < 0.001 then return end
     dx, dy = dx / length, dy / length
     local px, py = -dy, dx
-    love.graphics.setColor(1, 0.88, 0.22, 0.95)
+    tint = tint or { 1, 0.88, 0.22 }
+    love.graphics.setColor(tint[1], tint[2], tint[3], 0.95)
     love.graphics.polygon("fill", x + dx * 12, y + dy * 12,
         x - dx * 8 + px * 7, y - dy * 8 + py * 7,
         x - dx * 8 - px * 7, y - dy * 8 - py * 7)

@@ -6,6 +6,7 @@ local player_mod = require "src.entities.player"
 local ball_mod = require "src.entities.ball"
 local input_mod = require "src.input"
 local camera_mod = require "src.camera"
+local referee_mod = require "src.referee"
 
 function game.new(config, preset_name, num_players)
     local g = {}
@@ -104,11 +105,15 @@ function game.set_mode(g, mode_name, num_players)
     g.num_player_pairs = pair_idx
 
     g:reset_positions()
+    g.referee = referee_mod.new(cfg, g.field, g.ball, g.players)
     if g.camera then g.camera.field = g.field; g.camera.initialized = false end
 end
 
 -- Reinicia posições para o início da jogada (kick-off)
-function game.reset_positions(g)
+function game.reset_positions(g, swap_sides)
+    if swap_sides then
+        for i = 1, #g.players do g.players[i].spawn_x = -g.players[i].spawn_x end
+    end
     g.ball:reset()
     g.ball.prev_x, g.ball.prev_y = g.ball.x, g.ball.y
     for i = 1, #g.players do
@@ -127,103 +132,216 @@ function game.reset_match(g)
     g.score_p1 = 0
     g.score_p2 = 0
     g:reset_positions()
+    referee_mod.reset_match(g.referee)
 end
 
--- Passo de física determinístico: depende estritamente do estado 'g' e da lista 'commands'
-function game.step_fixed(g, dt, commands)
-    local cfg = g.config
-    local f = g.field
-    local b = g.ball
-    local players = g.players
-    local num_p = #players
-    b.prev_x, b.prev_y = b.x, b.y
-    for i = 1, num_p do
-        players[i].prev_x, players[i].prev_y = players[i].x, players[i].y
+local function push_player_to_valid_zone(p, target_x, target_y, dt, cfg)
+    local dx, dy = target_x - p.x, target_y - p.y
+    local distance_sq = dx * dx + dy * dy
+    if distance_sq < 0.01 then return end
+    local distance = math.sqrt(distance_sq)
+    local speed = math.min(cfg.referee.zonePushSpeed, distance * cfg.referee.zonePushGain)
+    local desired_x, desired_y = dx / distance * speed, dy / distance * speed
+    local response = math.min(1, cfg.referee.zonePushResponse * dt)
+    p.vx = p.vx + (desired_x - p.vx) * response
+    p.vy = p.vy + (desired_y - p.vy) * response
+    local speed_sq = p.vx * p.vx + p.vy * p.vy
+    if speed_sq > p.max_speed * p.max_speed then
+        local factor = p.max_speed / math.sqrt(speed_sq)
+        p.vx, p.vy = p.vx * factor, p.vy * factor
     end
-    commands = commands or g.commands
+end
 
-    -- 1. Tratamento do intervalo após gol
-    if g.is_goal_delay then
-        g.goal_delay_timer = g.goal_delay_timer - dt
-        if g.goal_delay_timer <= 0 then
-            g:reset_positions()
-            return
-        end
-        -- Durante a comemoração pós-gol, a bola apenas desacelera suavemente
-        physics.apply_damping_and_limit(b, b.damping, b.max_speed)
-        physics.integrate(b, dt)
+local function resolve_frozen_ball_player(p, ball)
+    local dx, dy = p.x - ball.x, p.y - ball.y
+    local min_distance = p.radius + ball.radius
+    local distance_sq = dx * dx + dy * dy
+    if distance_sq >= min_distance * min_distance then return end
+    local distance, nx, ny
+    if distance_sq > 0.000001 then
+        distance = math.sqrt(distance_sq)
+        nx, ny = dx / distance, dy / distance
     else
-        -- 2. Atualização física de cada jogador orientada por comandos
+        distance, nx, ny = 0, 1, 0
+    end
+    p.x = ball.x + nx * min_distance
+    p.y = ball.y + ny * min_distance
+    local into_obstacle = p.vx * nx + p.vy * ny
+    if into_obstacle < 0 then
+        p.vx = p.vx - nx * into_obstacle
+        p.vy = p.vy - ny * into_obstacle
+    end
+end
+
+local function record_goal(g, scoring_team)
+    if scoring_team == "red" then
+        g.score_p1 = g.score_p1 + 1
+        g.last_scorer = "p1"
+    else
+        g.score_p2 = g.score_p2 + 1
+        g.last_scorer = "p2"
+    end
+    g.is_goal_delay = true
+    g.goal_delay_timer = g.config.referee.goalPause
+    referee_mod.begin_goal(g.referee, scoring_team)
+end
+
+-- Passo fixo de jogo e arbitragem. Todas as coleções usadas aqui são pré-alocadas.
+function game.step_fixed(g, dt, commands)
+    local cfg, f, b, r = g.config, g.field, g.ball, g.referee
+    local players, num_p = g.players, #g.players
+    commands = commands or g.commands
+    b.prev_x, b.prev_y = b.x, b.y
+    for i = 1, num_p do players[i].prev_x, players[i].prev_y = players[i].x, players[i].y end
+
+    local transition = referee_mod.clock_tick(r, dt)
+    if transition == "second_half" then
+        g:reset_positions(true)
+        referee_mod.start_second_half(r)
+    elseif transition == "goal_kickoff" then
+        if cfg.game.kickOffReset == "full" then g:reset_positions() end
+        g.is_goal_delay = false
+        g.goal_delay_timer = 0
+    elseif transition == "period_end" then
+        g.is_goal_delay = false
+        return
+    end
+
+    if r.state == referee_mod.STATE_WARMUP or r.state == referee_mod.STATE_GOAL or
+       r.state == referee_mod.STATE_INTERVAL or r.state == referee_mod.STATE_FINISHED then
+        g.is_goal_delay = r.state == referee_mod.STATE_GOAL
+        g.goal_delay_timer = r.state == referee_mod.STATE_GOAL and r.stateTimer or 0
+        return
+    end
+
+    local frozen_at_start = r.ballFrozen
+    if referee_mod.is_restart_state(r.state) then
+        r.restartElapsed = r.restartElapsed + dt
+        if not referee_mod.has_team_player(players, r.restartTeam) then
+            r.noPlayerElapsed = r.noPlayerElapsed + dt
+            if r.noPlayerElapsed >= cfg.referee.noPlayerAutoRelease then
+                referee_mod.begin_play(r, nil)
+                frozen_at_start = false
+            end
+        end
+        if r.ballFrozen then
+            r.restartRemaining = r.restartRemaining - dt
+            if r.restartRemaining <= 0 then
+                referee_mod.timeout_restart(r)
+                if referee_mod.ball_stopped(r) then return end
+                frozen_at_start = r.ballFrozen
+            end
+        end
+    end
+
+    local illegal_touch = false
+    if frozen_at_start then
+        for i = 1, num_p do
+            local p, cmd = players[i], commands[i]
+            p:step_physics(dt, cmd.moveX, cmd.moveY, false, cmd.spinX, cmd.spinY,
+                           physics, nil, cfg.spin)
+            if p.team ~= r.restartTeam then
+                local tx, ty = referee_mod.restriction_target(r, p)
+                push_player_to_valid_zone(p, tx, ty, dt, cfg)
+            end
+            resolve_frozen_ball_player(p, b)
+        end
+
+        -- Apenas um jogador do time autorizado pode liberar a bola com chute.
+        for i = 1, num_p do
+            local p, cmd = players[i], commands[i]
+            if p.team == r.restartTeam and cmd.kick then
+                if physics.try_kick(p, b, p.kick_margin, p.kick_strength,
+                    p.kick_player_speed_ratio, p.spin_x, p.spin_y, cfg.spin) then
+                    p.is_kicking = true
+                    referee_mod.begin_play(r, p.id)
+                    r.lastTouchTeam, r.lastToucherId = p.team, p.id
+                    frozen_at_start = false
+                    b:step_physics(dt, physics, cfg.spin)
+                    break
+                end
+            end
+        end
+    else
+        for i = 1, num_p do
+            local p, cmd = players[i], commands[i]
+            local kicked = p:step_physics(dt, cmd.moveX, cmd.moveY, cmd.kick,
+                cmd.spinX, cmd.spinY, physics, b, cfg.spin)
+            if kicked and referee_mod.note_touch(r, p) then illegal_touch = true end
+        end
+        b:step_physics(dt, physics, cfg.spin)
+    end
+
+    for i = 1, g.num_player_pairs do
+        local pair = g.player_pairs[i]
+        physics.resolve_circle_circle(pair.p1, pair.p2, pair.p1.restitution)
+    end
+
+        if frozen_at_start then
+            for i = 1, num_p do resolve_frozen_ball_player(players[i], b) end
+        end
+
+    if not frozen_at_start then
+        if r.noRetouch and r.restartKickerId then
+            local initial_player
+            for i = 1, num_p do
+                if players[i].id == r.restartKickerId then initial_player = players[i]; break end
+            end
+            if initial_player then
+                local dx, dy = b.x - initial_player.x, b.y - initial_player.y
+                local contact = initial_player.radius + b.radius + cfg.referee.restartTouchSeparationPadding
+                if dx * dx + dy * dy > contact * contact then r.restartKickerSeparated = true end
+            end
+        end
         for i = 1, num_p do
             local p = players[i]
-            local cmd = commands[i]
-            p:step_physics(dt, cmd.moveX, cmd.moveY, cmd.kick, cmd.spinX, cmd.spinY, physics, b, cfg.spin)
-        end
-
-        -- 3. Atualização física da bola (curva lateral + atrito longitudinal + movimento)
-        b:step_physics(dt, physics, cfg.spin)
-
-        -- 4. Colisão Jogador x Jogador (usando pares pré-computados)
-        for i = 1, g.num_player_pairs do
-            local pair = g.player_pairs[i]
-            physics.resolve_circle_circle(pair.p1, pair.p2, pair.p1.restitution)
-        end
-
-        -- 5. Colisão Jogador x Bola (razão de massa 2:1, sem gerar efeito na bola em condução)
-        for i = 1, num_p do
-            physics.resolve_circle_circle(players[i], b, b.player_restitution)
+            if physics.resolve_circle_circle(p, b, b.player_restitution) then
+                if r.noRetouch and p.id == r.restartKickerId and not r.restartKickerSeparated then
+                    -- O contato do chute inicial ainda não é um segundo toque.
+                elseif referee_mod.note_touch(r, p) then
+                    illegal_touch = true
+                end
+            end
         end
     end
 
-    -- 6. Colisões com Traves (postes estáticos)
     for i = 1, #f.posts do
         local post = f.posts[i]
-        if physics.resolve_circle_post(b, post, b.post_restitution) then
-            -- Amortecimento de spin na trave (x0.5)
-            local wd = (cfg.spin and cfg.spin.wall_damping) or 0.5
-            if b.spin_x then b.spin_x = b.spin_x * wd end
-            if b.spin_y then b.spin_y = b.spin_y * wd end
+        if not frozen_at_start and physics.resolve_circle_post(b, post, b.post_restitution) then
+            local wd = cfg.spin.wall_damping
+            b.spin_x, b.spin_y = b.spin_x * wd, b.spin_y * wd
         end
-        for j = 1, num_p do
-            physics.resolve_circle_post(players[j], post, 0.2)
-        end
+        for j = 1, num_p do physics.resolve_circle_post(players[j], post, 0.2) end
     end
 
-    -- 7. Colisões da bola com paredes e redes
-    for i = 1, #f.walls do
-        local wall = f.walls[i]
-        if physics.resolve_circle_segment(b, wall, b.wall_restitution) then
-            -- Amortecimento de spin na parede (x0.5)
-            local wd = (cfg.spin and cfg.spin.wall_damping) or 0.5
-            if b.spin_x then b.spin_x = b.spin_x * wd end
-            if b.spin_y then b.spin_y = b.spin_y * wd end
+    if not frozen_at_start then
+        for i = 1, #f.walls do
+            local wall = f.walls[i]
+            if physics.resolve_circle_segment(b, wall, b.wall_restitution) then
+                local wd = cfg.spin.wall_damping
+                b.spin_x, b.spin_y = b.spin_x * wd, b.spin_y * wd
+            end
         end
     end
-
-    -- 8. Jogadores podem sair das linhas, mas ficam contidos pelas quatro paredes externas.
     for i = 1, #f.outer_walls do
         local wall = f.outer_walls[i]
-        for j = 1, num_p do
-            physics.resolve_circle_segment(players[j], wall, 0.1)
+        for j = 1, num_p do physics.resolve_circle_segment(players[j], wall, 0.1) end
+    end
+
+    if illegal_touch and not frozen_at_start then
+        referee_mod.resolve_violation(r)
+        if referee_mod.ball_stopped(r) then return end
+    elseif not frozen_at_start then
+        referee_mod.record_field_entry(r, b, f)
+        local kind, team, place_x, place_y = referee_mod.detect_exit(r, b, f)
+        if kind == "goal" then
+            record_goal(g, team)
+        elseif kind then
+            referee_mod.begin_restart(r, kind, team, place_x, place_y)
+            if referee_mod.ball_stopped(r) then return end
         end
     end
 
-    -- 9. Detecção de Gol (apenas quando a bola cruza a linha inteira)
-    if not g.is_goal_delay then
-        -- Gol no lado esquerdo -> Ponto para Azul (P2)
-        if (b.x + b.radius < f.left) and (b.y >= f.goal_top and b.y <= f.goal_bottom) then
-            g.score_p2 = g.score_p2 + 1
-            g.is_goal_delay = true
-            g.goal_delay_timer = cfg.game.goal_reset_delay
-            g.last_scorer = "p2"
-        -- Gol no lado direito -> Ponto para Vermelho (P1)
-        elseif (b.x - b.radius > f.right) and (b.y >= f.goal_top and b.y <= f.goal_bottom) then
-            g.score_p1 = g.score_p1 + 1
-            g.is_goal_delay = true
-            g.goal_delay_timer = cfg.game.goal_reset_delay
-            g.last_scorer = "p1"
-        end
-    end
 end
 
 -- Atualização da camada de apresentação (posse e linha de trajetória com zero alocações)
@@ -319,6 +437,7 @@ function game.draw(g, show_colliders, alpha)
 
     -- 1. Campo, traves e redes
     field_mod.draw(g.field, colors, cfg)
+    referee_mod.draw_zone(g.referee, colors)
     if show_colliders then
         field_mod.draw_colliders(g.field, colors, cfg)
     end
@@ -346,6 +465,7 @@ function game.draw(g, show_colliders, alpha)
     -- 4. Bola
     g.ball:draw(colors, g.ball.prev_x + (g.ball.x - g.ball.prev_x) * alpha,
                 g.ball.prev_y + (g.ball.y - g.ball.prev_y) * alpha)
+    referee_mod.draw_frozen_ring(g.referee, colors)
 end
 
 return game

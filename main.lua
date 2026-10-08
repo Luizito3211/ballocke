@@ -6,10 +6,13 @@ local input_mod = require "src.input"
 local camera_mod = require "src.camera"
 local calibration_mod = require "src.calibration"
 local preferences = require "src.preferences"
+local referee_mod = require "src.referee"
 
 local game_inst
 local ui_inst
 local calibration_inst
+local referee_panel_open = false
+local referee_test_touch = 1
 
 local accumulator = 0
 local screen_scale = 1
@@ -20,6 +23,20 @@ local show_colliders = false
 local last_dt = 0.016
 local spin_keyboard_enabled = false
 local mouse_just_pressed = false
+
+local function set_short_restarts(r, enabled)
+    r.testShortRestarts = enabled
+    if referee_mod.is_restart_state(r.state) then
+        r.restartRemaining = enabled and config.referee.testRestartTimeout or config.referee.restartTimeouts[r.restartType]
+    end
+end
+
+local function set_test_half(r, one_minute)
+    r.testOneMinute = one_minute
+    r.halfDuration = one_minute and config.game.testHalfDuration or config.game.halfDuration
+    r.halfRemaining = r.halfDuration
+    r.regulationExpired, r.graceRemaining = false, config.referee.regulationGrace
+end
 
 function love.initialize_game(filesystem)
     config.camera.viewWidth = preferences.read_view_width(config, filesystem)
@@ -69,6 +86,7 @@ end
 function love.update(dt)
     if not game_inst then return end
     last_dt = dt
+    if referee_panel_open then return end
     if calibration_inst and calibration_inst.open then
     local followed = game_inst.players[1]
     local alpha = accumulator / config.fixed_dt
@@ -131,6 +149,7 @@ function love.update(dt)
     -- 4. Camada de apresentação: calcula linha de trajetória da posse e placar
     game_inst:update_presentation()
     ui_inst:update_score(game_inst.score_p1, game_inst.score_p2)
+    ui_inst:update_referee(game_inst.referee)
 end
 
 function love.draw()
@@ -157,6 +176,7 @@ function love.draw()
 
     -- Desenha HUD, placar e seletor de efeito
     ui_inst:draw_hud(game_inst, config.colors, vw, vh)
+    ui_inst:draw_referee(game_inst.referee, vw)
 
     -- Overlay de debug (F3)
     ui_inst:draw_debug(last_dt, show_debug, game_inst)
@@ -168,10 +188,15 @@ function love.draw()
             local dx, dy = bx - vw * 0.5, by - vh * 0.5
             local factor = math.min((vw * 0.5 - 28) / math.max(math.abs(dx), 0.001),
                                     (vh * 0.5 - 28) / math.max(math.abs(dy), 0.001))
-            ui_inst:draw_ball_arrow(vw * 0.5 + dx * factor, vh * 0.5 + dy * factor, dx, dy)
+            local tint
+            if game_inst.referee.ballFrozen and referee_mod.is_restart_state(game_inst.referee.state) then
+                tint = game_inst.referee.restartTeam == "red" and config.colors.score_p1 or config.colors.score_p2
+            end
+            ui_inst:draw_ball_arrow(vw * 0.5 + dx * factor, vh * 0.5 + dy * factor, dx, dy, tint)
         end
     end
     if calibration_inst and calibration_inst.open then calibration_inst:draw(vw, vh) end
+    if referee_panel_open then ui_inst:draw_test_panel(vw, vh) end
     love.graphics.setScissor()
     love.graphics.pop()
 end
@@ -183,6 +208,52 @@ function love.mousepressed(x, y, button)
 end
 
 function love.keypressed(key)
+    if referee_panel_open then
+        local r = game_inst.referee
+        if key == "f6" or key == "escape" then referee_panel_open = false
+        elseif key == "up" then ui_inst.test_selection = math.max(1, ui_inst.test_selection - 1)
+        elseif key == "down" then ui_inst.test_selection = math.min(#ui_inst.test_rows, ui_inst.test_selection + 1)
+        elseif (key == "left" or key == "right") and ui_inst.test_selection == 5 then
+            referee_test_touch = referee_test_touch + (key == "right" and 1 or -1)
+            if referee_test_touch < 1 then referee_test_touch = 3 elseif referee_test_touch > 3 then referee_test_touch = 1 end
+            ui_inst:refresh_test_panel(r.testShortRestarts, r.testOneMinute, referee_test_touch)
+        elseif key == "left" or key == "right" then
+            local direction = key == "right"
+            if ui_inst.test_selection == 6 then set_short_restarts(r, direction)
+            elseif ui_inst.test_selection == 7 then
+                set_test_half(r, direction)
+            end
+            ui_inst:refresh_test_panel(r.testShortRestarts, r.testOneMinute, referee_test_touch)
+        elseif key == "f7" then
+            local p, b, f = game_inst.players[1], game_inst.ball, game_inst.field
+            p.x = math.max(f.outer_left + p.radius,
+                math.min(f.outer_right - p.radius, b.x - p.radius - b.radius - config.testPanel.playerBallGap))
+            p.y = math.max(f.outer_top + p.radius,
+                math.min(f.outer_bottom - p.radius, b.y))
+            p.prev_x, p.prev_y, p.vx, p.vy = p.x, p.y, 0, 0
+        elseif key == "return" or key == "kpenter" then
+            local row = ui_inst.test_selection
+            if row >= 1 and row <= 4 then
+                local f, b = game_inst.field, game_inst.ball
+                if r.lastTouchTeam then r.lastTouchTeam = nil end
+                r.state, r.restartKickerId, r.noRetouch = referee_mod.STATE_PLAY, nil, false
+                if referee_test_touch == 2 then r.lastTouchTeam = "red"
+                elseif referee_test_touch == 3 then r.lastTouchTeam = "blue" end
+                local o = config.testPanel.outOffset
+                if row == config.testPanel.lateralTop then b.x, b.y = 0, f.top - b.radius - o
+                elseif row == config.testPanel.lateralBottom then b.x, b.y = 0, f.bottom + b.radius + o
+                elseif row == config.testPanel.endLeft then b.x, b.y = f.left - b.radius - o, -(config.field.goal_mouth_width / 2 + config.field.post_radius + b.radius + o)
+                else b.x, b.y = f.right + b.radius + o, -(config.field.goal_mouth_width / 2 + config.field.post_radius + b.radius + o) end
+                b.prev_x, b.prev_y, b.vx, b.vy = b.x, b.y, 0, 0
+                r.ballFrozen = false
+                referee_panel_open = false
+            elseif row == 6 then set_short_restarts(r, not r.testShortRestarts)
+            elseif row == 7 then set_test_half(r, not r.testOneMinute)
+            elseif row == 8 then referee_mod.end_period(r); referee_panel_open = false end
+            ui_inst:refresh_test_panel(r.testShortRestarts, r.testOneMinute, referee_test_touch)
+        end
+        return
+    end
     if calibration_inst and calibration_inst.open then
         if key == "f5" then calibration_inst.open = false
         elseif key == "s" then calibration_inst:save()
@@ -190,6 +261,11 @@ function love.keypressed(key)
         return
     end
     if key == "f5" and game_inst and game_inst.is_training then calibration_inst.open = true; return end
+    if key == "f6" and game_inst and game_inst.is_training then
+        referee_panel_open = true
+        ui_inst:refresh_test_panel(game_inst.referee.testShortRestarts, game_inst.referee.testOneMinute, referee_test_touch)
+        return
+    end
     if key == "=" or key == "kp+" or key == "-" or key == "kp-" then
         local delta = (key == "=" or key == "kp+") and -config.camera.viewWidthStep or config.camera.viewWidthStep
         config.camera.viewWidth = math.max(config.camera.viewWidthMin,

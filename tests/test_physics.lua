@@ -464,6 +464,168 @@ function tests.run()
         assert_test("10.000 ticks mantêm estáveis os buffers pré-alocados da simulação e previsão", stable_buffers)
     end
 
+    do
+        local referee = require "src.referee"
+        local g = game_mod.new(config, "1v1", 2)
+        local r, field, ball = g.referee, g.field, g.ball
+        local ok = true
+        referee.begin_restart(r, "kickoff", "red", 0, 0)
+        local cases = {
+            { "lateral", 0, field.top - ball.radius - 1, "blue", field.top },
+            { "lateral", 0, field.bottom + ball.radius + 1, "blue", field.bottom },
+        }
+        for i = 1, #cases do
+            local c = cases[i]
+            r.state, r.lastTouchTeam = referee.STATE_PLAY, "red"
+            ball.x, ball.y = c[2], c[3]
+            local kind, team, x, y = referee.detect_exit(r, ball, field)
+            if kind ~= c[1] or team ~= c[4] or y ~= c[5] or x ~= 0 then ok = false end
+        end
+        r.state, r.lastTouchTeam = referee.STATE_PLAY, "red"
+        ball.x, ball.y = field.left - ball.radius - 1, -200
+        local kind, team, x, y = referee.detect_exit(r, ball, field)
+        ok = ok and kind == "corner" and team == "blue" and x == field.left and y == field.top
+        r.lastTouchTeam = "blue"
+        kind, team = referee.detect_exit(r, ball, field)
+        ok = ok and kind == "goal_kick" and team == "red"
+        ball.x, ball.y = field.right + ball.radius + 1, -200
+        r.lastTouchTeam = "red"
+        kind, team = referee.detect_exit(r, ball, field)
+        ok = ok and kind == "goal_kick" and team == "blue"
+        r.lastTouchTeam = "blue"
+        kind, team = referee.detect_exit(r, ball, field)
+        ok = ok and kind == "corner" and team == "red"
+        assert_test("Árbitro classifica laterais e fundos dos dois lados com atribuição correta", ok)
+    end
+
+    do
+        local referee = require "src.referee"
+        local g = game_mod.new(config, "1v1", 2)
+        local r, f, b = g.referee, g.field, g.ball
+        r.state, r.lastTouchTeam = referee.STATE_PLAY, "red"
+        b.x, b.y = f.right + b.radius + 1, 0
+        local kind, scoring = referee.detect_exit(r, b, f)
+        local goal_ok = kind == "goal" and scoring == "red"
+        referee.begin_goal(r, scoring)
+        referee.clock_tick(r, config.referee.goalPause + 0.01)
+        goal_ok = goal_ok and r.state == referee.STATE_KICKOFF and r.restartTeam == "blue" and r.ballFrozen
+        referee.begin_restart(r, "lateral", "red", 0, f.top)
+        local stopped_x, stopped_y = b.x, b.y
+        g:step_fixed(config.fixed_dt, g.commands)
+        goal_ok = goal_ok and b.x == stopped_x and b.y == stopped_y
+        assert_test("Gol independe do último toque, pausa e reinicia pelo time que sofreu; bola parada congela", goal_ok)
+    end
+
+    do
+        local referee = require "src.referee"
+        local g = game_mod.new(config, "1v1", 2)
+        local r, p, b, f = g.referee, g.players[1], g.ball, g.field
+        referee.begin_restart(r, "kickoff", "red", 0, 0)
+        p.x, p.y = b.x - p.radius - b.radius - 1, b.y
+        local before = b.x
+        local commands = g.commands
+        commands[1].kick = false
+        g:step_fixed(config.fixed_dt, commands)
+        local frozen_ok = r.ballFrozen and b.x == before
+        commands[1].kick = true
+        p.x, p.y, p.vx, p.vy = b.x - p.radius - b.radius + 1, b.y, 0, 0
+        g:step_fixed(config.fixed_dt, commands)
+        commands[1].kick = false
+        frozen_ok = frozen_ok and not r.ballFrozen and r.state == referee.STATE_PLAY and r.noRetouch
+        -- Sem time autorizado: liberação automática após ~2 s.
+        referee.begin_restart(r, "lateral", "red", 0, f.top)
+        p.team = "blue"
+        for _ = 1, 121 do g:step_fixed(config.fixed_dt, commands) end
+        frozen_ok = frozen_ok and not r.ballFrozen
+        assert_test("Bola congelada só sai em chute autorizado e libera após 2 s sem cobrador", frozen_ok)
+    end
+
+    do
+        local referee = require "src.referee"
+        local g = game_mod.new(config, "1v1", 2)
+        local r, f, p = g.referee, g.field, g.players[2]
+        local ok = true
+        referee.begin_restart(r, "corner", "red", f.left, f.top)
+        referee.resolve_violation(r)
+        ok = ok and r.restartType == "goal_kick" and r.restartTeam == "blue"
+        referee.begin_restart(r, "goal_kick", "red", f.left + 75, -100)
+        referee.resolve_violation(r)
+        ok = ok and r.restartType == "corner" and r.restartTeam == "blue"
+        referee.begin_restart(r, "lateral", "red", f.left + 100, f.top)
+        referee.timeout_restart(r)
+        ok = ok and r.restartType == "lateral" and r.restartTeam == "blue" and r.restartRemaining == config.referee.restartTimeouts.lateral
+        referee.begin_restart(r, "corner", "red", f.left, f.top)
+        p.x, p.y = f.outer_left + p.radius + 1, f.outer_top + p.radius + 1
+        local tx, ty = referee.restriction_target(r, p)
+        ok = ok and (tx ~= p.x or ty ~= p.y) and tx >= f.outer_left + p.radius and ty >= f.outer_top + p.radius
+        local tx2, ty2 = referee.restriction_target(r, { x = tx, y = ty, radius = p.radius, team = "blue" })
+        ok = ok and tx2 == tx and ty2 == ty
+        p.x, p.y, p.vx, p.vy = f.outer_left + p.radius + 1, f.outer_top + p.radius + 1, 0, 0
+        local before_x, before_y = p.x, p.y
+        g:step_fixed(config.fixed_dt, g.commands)
+        ok = ok and math.abs(p.x - before_x) < 8 and math.abs(p.y - before_y) < 8
+        for _ = 1, 120 do g:step_fixed(config.fixed_dt, g.commands) end
+        local progress = math.sqrt((p.x - before_x) ^ 2 + (p.y - before_y) ^ 2)
+        ok = ok and progress > 100
+        assert_test("Timeout, cobrança incorreta e zona de escanteio junto ao canto encontram saída", ok,
+            string.format("alvo=(%.1f, %.1f), legal=(%.1f, %.1f), deslocamento=%.1f", tx, ty, tx2, ty2, progress))
+    end
+
+    do
+        local referee = require "src.referee"
+        local g = game_mod.new(config, "1v1", 2)
+        local r = g.referee
+        local player = g.players[1]
+        referee.begin_restart(r, "kickoff", "red", 0, 0)
+        referee.begin_play(r, player.id)
+        local kicker_cannot_retouch = referee.note_touch(r, player)
+        local opponent = g.players[2]
+        local other_touch_ok = not referee.note_touch(r, opponent) and not r.noRetouch
+        referee.begin_restart(r, "lateral", "red", 0, g.field.top)
+        local timings = config.referee.restartTimeouts.lateral == 20 and
+            config.referee.restartTimeouts.goal_kick == 20 and
+            config.referee.restartTimeouts.corner == 25 and
+            config.referee.restartTimeouts.kickoff == 25 and
+            config.game.halfDuration == 300 and config.game.testHalfDuration == 60
+        assert_test("Toque duplo, toque de outro jogador e tempos padrão/teste", kicker_cannot_retouch and other_touch_ok and timings)
+    end
+
+    do
+        local referee = require "src.referee"
+        local g = game_mod.new(config, "1v1", 2)
+        local r = g.referee
+        referee.begin_play(r, nil)
+        r.halfRemaining = config.fixed_dt
+        g:step_fixed(config.fixed_dt, g.commands)
+        local grace_started = r.regulationExpired and r.state == referee.STATE_PLAY and r.graceRemaining == config.referee.regulationGrace
+        local stoppage_ends_now = referee.ball_stopped(r) and r.state == referee.STATE_INTERVAL
+        referee.start_second_half(r)
+        referee.begin_play(r, nil)
+        r.halfRemaining = config.fixed_dt
+        g:step_fixed(config.fixed_dt, g.commands)
+        local maximum_grace = referee.clock_tick(r, config.referee.regulationGrace + config.fixed_dt)
+        assert_test("Relógio encerra na próxima parada ou no limite de 15 s", grace_started and stoppage_ends_now and
+            maximum_grace == "period_end" and r.state == referee.STATE_FINISHED)
+    end
+
+    do
+        local referee = require "src.referee"
+        local g = game_mod.new(config, "1v1", 2)
+        local r = g.referee
+        r.testOneMinute = true
+        r.halfDuration, r.halfRemaining = config.game.testHalfDuration, config.game.testHalfDuration
+        referee.begin_play(r, nil)
+        local ticks = 0
+        while r.state ~= referee.STATE_FINISHED and ticks < 12000 do
+            g:step_fixed(config.fixed_dt, g.commands)
+            ticks = ticks + 1
+        end
+        local full_match = r.state == referee.STATE_FINISHED and r.half == 2 and not r.redAttacksRight and ticks < 12000
+        assert_test("Partida simulada completa: dois tempos, intervalo, troca de lado e fim sem travar", full_match,
+            string.format("estado=%s, tempo=%d ticks", r.state, ticks))
+    end
+
+
     io.write("\n=======================================================\n")
     io.write(string.format("RESULTADO FINAL: %d / %d TESTES APROVADOS\n", passed, total))
     io.write("=======================================================\n\n")
