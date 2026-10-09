@@ -1,9 +1,20 @@
 -- Sessão host autoritativa, com INPUT não confiável e SNAPSHOT a 30 Hz.
 local protocol = require "net.protocol"
+local interpolation = require "net.interpolation"
+local physics = require "src.physics"
 local session = {}
 local Session = {}
 Session.__index = Session
 local ZERO_COMMAND = { moveX = 0, moveY = 0, kick = false, spinX = 0, spinY = 0 }
+local SNAPSHOT_BUFFER_SIZE = 8
+
+local function new_snapshot_buffer()
+    local buffer = {}
+    for i = 1, SNAPSHOT_BUFFER_SIZE do
+        buffer[i] = { state = protocol.new_snapshot(), time = 0 }
+    end
+    return buffer
+end
 
 local function copy_command(dst, src)
     dst.moveX, dst.moveY, dst.kick = src.moveX, src.moveY, src.kick
@@ -29,8 +40,11 @@ function session.new_client(room, game, config)
     return setmetatable({ role = "client", room = room, game = game, config = config,
         elapsed = 0, connectElapsed = 0, inputElapsed = 0, inputSequence = 0,
         lastInput = { moveX = 99, moveY = 99, kick = false, spinX = 99, spinY = 99 },
-        latest = protocol.new_snapshot(), hasSnapshot = false, connected = false,
-        localPlayerIndex = 0, message = "Conectando...", closed = false }, Session)
+        snapshots = new_snapshot_buffer(), snapshotWrite = 0, snapshotCount = 0,
+        latest = protocol.new_snapshot(), sampled = protocol.new_snapshot(), hasSnapshot = false, connected = false,
+        predictionAccumulator = 0, predictionDt = config.fixed_dt, lastCommand = { moveX = 0, moveY = 0, kick = false, spinX = 0, spinY = 0 },
+        localPlayerIndex = 0,
+        message = "Conectando...", closed = false }, Session)
 end
 
 local function peer_row(s, peer)
@@ -115,8 +129,15 @@ function Session:_client_packet(event, packet)
                 self.lastSnapshotAt = self.elapsed
             end
         end
-    elseif tag == "S" and protocol.unpack_snapshot(packet, self.latest) then
-        self.hasSnapshot, self.lastSnapshotAt = true, self.elapsed
+    elseif tag == "S" then
+        self.snapshotWrite = self.snapshotWrite % SNAPSHOT_BUFFER_SIZE + 1
+        local row = self.snapshots[self.snapshotWrite]
+        if protocol.unpack_snapshot(packet, row.state) then
+            row.time = self.elapsed
+            self.latest = row.state
+            self.snapshotCount = math.min(self.snapshotCount + 1, SNAPSHOT_BUFFER_SIZE)
+            self.hasSnapshot, self.lastSnapshotAt = true, self.elapsed
+        end
         self.message = "Conectado."
     elseif tag == "V" then
         local code, state, team, red, blue, new_index = protocol.unpack_event(packet)
@@ -197,6 +218,8 @@ function Session:update(dt, local_command)
         self.room:update(dt)
         self.inputElapsed = self.inputElapsed + dt
         local_command = local_command or ZERO_COMMAND
+        copy_command(self.lastCommand, local_command)
+        self.predictionDt = math.min(dt, self.config.max_dt_acc)
         if self.connected and self.localPlayerIndex > 0 and
            (not same_command(local_command, self.lastInput) or self.inputElapsed >= self.config.network.inputKeepalive) then
             self.inputSequence = (self.inputSequence + 1) % 65536
@@ -204,12 +227,46 @@ function Session:update(dt, local_command)
             copy_command(self.lastInput, local_command)
             self.inputElapsed = 0
         end
+        if self.connected and self.localPlayerIndex > 0 then
+            self.predictionAccumulator = self.predictionAccumulator + self.predictionDt
+            local steps = 0
+            local p = self.game.players[self.localPlayerIndex]
+            while p and self.predictionAccumulator >= self.config.fixed_dt and steps < self.config.max_physics_steps do
+                p.prev_x, p.prev_y = p.x, p.y
+                p:step_physics(self.config.fixed_dt, self.lastCommand.moveX, self.lastCommand.moveY,
+                    self.lastCommand.kick, self.lastCommand.spinX, self.lastCommand.spinY,
+                    physics, nil, self.config.spin)
+                local f = self.game.field
+                p.x = math.max(f.outer_left + p.radius, math.min(f.outer_right - p.radius, p.x))
+                p.y = math.max(f.outer_top + p.radius, math.min(f.outer_bottom - p.radius, p.y))
+                self.predictionAccumulator = self.predictionAccumulator - self.config.fixed_dt
+                steps = steps + 1
+            end
+        end
     end
 end
 
 function Session:apply_snapshot()
     if self.role ~= "client" or not self.hasSnapshot then return false end
     local g, s, r = self.game, self.latest, self.game.referee
+    if self.snapshotCount >= 2 then
+        local target = self.elapsed - self.config.network.interpolationDelay
+        local before, after
+        local oldest = (self.snapshotWrite - self.snapshotCount) % SNAPSHOT_BUFFER_SIZE + 1
+        local previous = self.snapshots[oldest]
+        before, after = previous, previous
+        for offset = 1, self.snapshotCount - 1 do
+            local index = (oldest + offset - 1) % SNAPSHOT_BUFFER_SIZE + 1
+            local row = self.snapshots[index]
+            if row.time <= target then before = row end
+            if row.time >= target then after = row; break end
+            after = row
+        end
+        local span = after.time - before.time
+        local alpha = span > 0 and (target - before.time) / span or 1
+        interpolation.sample(before.state, after.state, alpha, self.sampled)
+        s = self.sampled
+    end
     g.score_p1, g.score_p2 = s.scoreRed, s.scoreBlue
     g.ball.prev_x, g.ball.prev_y = g.ball.x, g.ball.y
     g.ball.x, g.ball.y, g.ball.vx, g.ball.vy = s.ballX, s.ballY, s.ballVX, s.ballVY
@@ -225,7 +282,15 @@ function Session:apply_snapshot()
         local p = g.players[i]
         p.online_visible = i <= s.playerCount
         if i <= s.playerCount then
-            p.prev_x, p.prev_y, p.x, p.y = p.x, p.y, s.players[i].x, s.players[i].y
+            p.prev_x, p.prev_y = p.x, p.y
+            if i == self.localPlayerIndex then
+                -- Suaviza erro de predição em vez de teletransportar o jogador.
+                local blend = math.min(1, math.max(0, self.predictionDt) * 8)
+                p.x = p.x + (s.players[i].x - p.x) * blend
+                p.y = p.y + (s.players[i].y - p.y) * blend
+            else
+                p.x, p.y = s.players[i].x, s.players[i].y
+            end
         end
     end
     return true

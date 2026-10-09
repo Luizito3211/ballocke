@@ -1036,6 +1036,19 @@ function tests.run()
     end
 
     do
+        local interpolation = require "net.interpolation"
+        local before, after, out = { ballX = 0, ballY = 10, ballVX = 2, ballVY = 4,
+            playerCount = 1, players = { { x = -100, y = 20 } } },
+            { ballX = 100, ballY = 30, ballVX = 6, ballVY = 8, scoreRed = 2,
+              playerCount = 1, players = { { x = 100, y = 60 } } },
+            { players = { {} } }
+        interpolation.sample(before, after, 0.25, out)
+        assert_test("Interpolacao calcula estados entre snapshots e preserva metadados autoritativos",
+            out.ballX == 25 and out.ballY == 15 and out.players[1].x == -50 and
+            out.players[1].y == 30 and out.scoreRed == 2 and out.playerCount == 1)
+    end
+
+    do
         local referee = require "src.referee"
         local smoke_call_ok, smoke_ok, smoke_result = xpcall(function()
             local empty_saves = {
