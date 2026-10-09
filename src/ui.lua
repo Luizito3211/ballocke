@@ -21,10 +21,14 @@ function ui.new(config)
     u.text_spin_label = love.graphics.newText(u.font_mini, "EFEITO (C)")
     u.text_reset_icon = love.graphics.newText(u.font_mini, "C")
     u.font_ref = love.graphics.newFont(18)
+    u.font_notice = love.graphics.newFont(34)
     u.font_panel = love.graphics.newFont(16)
     u.text_referee = love.graphics.newText(u.font_ref, "AQUECIMENTO")
     u.text_clock = love.graphics.newText(u.font_hud, "1º TEMPO  05:00")
     u.text_restart_clock = love.graphics.newText(u.font_hud, "")
+    u.text_decision_notice = love.graphics.newText(u.font_notice, "")
+    u.notice_color = { 1, 1, 1 }
+    u.notice_visible = false
     u.ref_second = -1
     u.test_selection = 1
     u.test_touch = 1
@@ -48,6 +52,18 @@ function ui.new(config)
 end
 
 function ui.update_referee(u, r)
+    if u.current_notice ~= r.decisionNotice then
+        u.current_notice = r.decisionNotice
+        u.text_decision_notice:set(r.decisionNotice or "")
+    end
+    u.notice_visible = r.noticeTimer > 0 and u.text_decision_notice:getWidth() > 0
+    if r.noticeTeam == "red" then
+        u.notice_color[1], u.notice_color[2], u.notice_color[3] = 1, 0.35, 0.30
+    elseif r.noticeTeam == "blue" then
+        u.notice_color[1], u.notice_color[2], u.notice_color[3] = 0.40, 0.68, 1
+    else
+        u.notice_color[1], u.notice_color[2], u.notice_color[3] = 1, 1, 1
+    end
     local sec = math.floor(math.max(0, r.halfRemaining) + 0.999)
     if sec ~= u.ref_second then
         u.ref_second = sec
@@ -79,7 +95,7 @@ function ui.refresh_test_panel(u, short_restarts, one_minute, last_touch)
     u.test_rows[7]:set("Duração teste: " .. (one_minute and "1 minuto" or "5 minutos"))
 end
 
-function ui.draw_referee(u, virtual_width)
+function ui.draw_referee(u, virtual_width, virtual_height)
     love.graphics.setColor(0, 0, 0, 0.6)
     love.graphics.rectangle("fill", virtual_width / 2 - 220, 70, 440, 64, 6, 6)
     love.graphics.setColor(1, 1, 1, 1)
@@ -88,6 +104,17 @@ function ui.draw_referee(u, virtual_width)
     love.graphics.draw(u.text_clock, virtual_width / 2 - u.text_clock:getWidth() / 2, 108)
     if u.text_restart_clock:getWidth() > 0 then
         love.graphics.draw(u.text_restart_clock, virtual_width / 2 - u.text_restart_clock:getWidth() / 2, 136)
+    end
+    if u.notice_visible then
+        local nw, nh = u.text_decision_notice:getWidth(), u.text_decision_notice:getHeight()
+        local text_scale = math.min(1, (virtual_width - 64) / math.max(nw, 1))
+        local display_w, display_h = nw * text_scale, nh * text_scale
+        local box_w = math.min(virtual_width - 48, display_w + 56)
+        local box_y = virtual_height * 0.5 - display_h * 0.5 - 18
+        love.graphics.setColor(0, 0, 0, 0.88)
+        love.graphics.rectangle("fill", (virtual_width - box_w) * 0.5, box_y, box_w, display_h + 36, 10, 10)
+        love.graphics.setColor(u.notice_color[1], u.notice_color[2], u.notice_color[3], 1)
+        love.graphics.draw(u.text_decision_notice, (virtual_width - display_w) * 0.5, box_y + 18, 0, text_scale, text_scale)
     end
 end
 

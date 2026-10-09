@@ -353,7 +353,7 @@ function tests.run()
         physics.apply_damping_and_limit(p, config.player.damping, config.player.max_speed)
         local b = { vx = 200, vy = 0 }
         physics.apply_damping_and_limit(b, config.ball.damping, config.ball.max_speed)
-        assert_test("Atrito permanece igual ao da física-base", math.abs(p.vx - 96) < 0.001 and math.abs(b.vx - 198) < 0.001)
+        assert_test("Atrito do jogador preservado e bola calibrada em 0.984", math.abs(p.vx - 96) < 0.001 and math.abs(b.vx - 196.8) < 0.001 and config.ball.damping == 0.984)
     end
 
     -- Spin zero continua exatamente igual à simulação sem efeito.
@@ -429,6 +429,21 @@ function tests.run()
 
     -- Distância real percorrida no comando máximo usando os coeficientes intactos da v1.0.
     do
+    do
+        local b = new_ball(0, 0, config.player.kick_strength, 0)
+        local ticks = 0
+        while math.abs(b.vx) >= config.ball.stop_speed_threshold and ticks < 36000 do
+            physics.apply_spin_and_damping(b, config.spin)
+            physics.integrate(b, config.fixed_dt)
+            ticks = ticks + 1
+        end
+        local range = b.x
+        local ratio = config.player.kick_strength / config.player.max_speed
+        assert_test("Medições do chute máximo: alcance, razão de velocidades e parada abaixo de 1 u/s",
+            ticks < 36000 and config.ball.damping == 0.984 and ratio >= 1.3)
+        io.write(string.format("       Chute máximo: %.1f unidades (%.1f%% da quadra); razão bola/jogador %.2fx; parada < %.1f u/s em %.2f s.\n",
+            range, range / config.field.play_width * 100, ratio, config.ball.stop_speed_threshold, ticks * config.fixed_dt))
+    end
         local p = require("src.entities.player").new(config.players[1], config, f.left, 0)
         local traveled = 0
         local ticks = 0
@@ -531,7 +546,7 @@ function tests.run()
         p.x, p.y, p.vx, p.vy = b.x - p.radius - b.radius + 1, b.y, 0, 0
         g:step_fixed(config.fixed_dt, commands)
         commands[1].kick = false
-        frozen_ok = frozen_ok and not r.ballFrozen and r.state == referee.STATE_PLAY and r.noRetouch
+        frozen_ok = frozen_ok and not r.ballFrozen and r.state == referee.STATE_PLAY and not r.noRetouch
         -- Sem time autorizado: liberação automática após ~2 s.
         referee.begin_restart(r, "lateral", "red", 0, f.top)
         p.team = "blue"
@@ -574,20 +589,39 @@ function tests.run()
     do
         local referee = require "src.referee"
         local g = game_mod.new(config, "1v1", 2)
-        local r = g.referee
-        local player = g.players[1]
+        local r, player, opponent = g.referee, g.players[1], g.players[2]
         referee.begin_restart(r, "kickoff", "red", 0, 0)
         referee.begin_play(r, player.id)
-        local kicker_cannot_retouch = referee.note_touch(r, player)
-        local opponent = g.players[2]
-        local other_touch_ok = not referee.note_touch(r, opponent) and not r.noRetouch
+        local kickoff_ok = not r.noRetouch and not referee.note_touch(r, player)
+        local restarts_ok = true
+        local kinds = { "lateral", "goal_kick", "corner" }
+        for i = 1, #kinds do
+            local kind = kinds[i]
+            referee.begin_restart(r, kind, "red", 0, 0)
+            referee.begin_play(r, player.id)
+            r.ball.x, r.ball.y = config.referee.doubleTouchGraceDistance - 1, 0
+            if referee.note_touch(r, player) then restarts_ok = false end
+            referee.note_touch(r, opponent)
+            if r.noRetouch then restarts_ok = false end
+            referee.begin_restart(r, kind, "red", 0, 0)
+            referee.begin_play(r, player.id)
+            r.ball.x = config.referee.doubleTouchGraceDistance + 1
+            if not referee.note_touch(r, player) or not r.restartBallTraveled then restarts_ok = false end
+            referee.resolve_violation(r)
+            if r.restartTeam ~= "blue" or not r.decisionNotice:find("TOQUE DUPLO - SAQUE PARA AZUL", 1, true) then restarts_ok = false end
+        end
+        local notice_ok = r.noticeTimer >= 2
+        referee.clock_tick(r, 1.99)
+        notice_ok = notice_ok and r.noticeTimer > 0
+        referee.clock_tick(r, 0.02)
+        notice_ok = notice_ok and r.noticeTimer == 0
         referee.begin_restart(r, "lateral", "red", 0, g.field.top)
         local timings = config.referee.restartTimeouts.lateral == 0 and
             config.referee.restartTimeouts.goal_kick == 0 and
             config.referee.restartTimeouts.corner == 0 and
             config.referee.restartTimeouts.kickoff == 0 and
             config.game.halfDuration == 300 and config.game.testHalfDuration == 60
-        assert_test("Toque duplo, toque de outro jogador e tempos padrão/teste", kicker_cannot_retouch and other_touch_ok and timings)
+        assert_test("Toque duplo: saque isento, tolerancia, punicao apos 250 e aviso de 2 s", kickoff_ok and restarts_ok and notice_ok and timings, string.format("kickoff=%s, reinicios=%s, aviso=%s", tostring(kickoff_ok), tostring(restarts_ok), tostring(notice_ok)))
     end
 
     do

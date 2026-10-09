@@ -42,6 +42,22 @@ local function set_frozen_ball(ball, x, y)
     ball.spin_x, ball.spin_y = 0, 0
 end
 
+local function team_label(r, team)
+    return r.config.referee.teamName[team] or string.upper(team or "")
+end
+
+local function restart_notice(r, kind, team, cause)
+    local base = message_for(r.config, kind, team)
+    if cause and cause ~= "" then return base .. ": " .. cause end
+    return base
+end
+
+local function announce(r, message, team)
+    r.decisionNotice = message
+    r.noticeTimer = r.config.referee.decisionNoticeSeconds
+    r.noticeTeam = team
+end
+
 function referee.new(config, field, ball, players)
     local first = config.referee.firstKickoffTeam
     local r = {
@@ -62,6 +78,8 @@ function referee.new(config, field, ball, players)
         displayedSeconds = -1,
         matchElapsed = 0, eventLog = nil, scoringTeam = nil,
         barrierEvacuationLogged = false,
+        decisionNotice = "", noticeTimer = 0, noticeTeam = nil,
+        restartBallTraveled = false,
     }
     set_frozen_ball(ball, 0, 0)
     return r
@@ -107,13 +125,21 @@ function referee.begin_restart(r, kind, team, x, y, reason)
     r.restartElapsed, r.noPlayerElapsed = 0, 0
     r.barrierEvacuationLogged = false
     r.restartEnteredField = false
+    r.restartBallTraveled = false
     r.restartKickerId, r.noRetouch, r.restartKickerSeparated = nil, false, false
     r.lastTouchTeam, r.lastToucherId = team, nil
     r.ballFrozen = true
     r.message = message_for(cfg, kind, team)
+    local notice
+    if reason and (reason:find("TOQUE DUPLO", 1, true) == 1 or reason:find("COBRANÇA INCORRETA", 1, true) == 1) then
+        notice = reason
+    else
+        notice = restart_notice(r, kind, team, reason)
+    end
+    announce(r, notice, team)
     set_frozen_ball(ball, x, y)
-    record(r, "ESTADO", old_state, state, reason or ("início de " .. kind))
-    if old_x ~= x or old_y ~= y then record(r, "REPOSICIONAMENTO_BOLA", state, state, reason or ("cobrança de " .. kind)) end
+    record(r, "ESTADO", old_state, state, notice)
+    if old_x ~= x or old_y ~= y then record(r, "REPOSICIONAMENTO_BOLA", state, state, notice) end
 end
 
 function referee.begin_play(r, kicker_id, reason)
@@ -122,7 +148,10 @@ function referee.begin_play(r, kicker_id, reason)
     r.message = ""
     r.ballFrozen = false
     r.restartKickerId, r.restartKickerSeparated = kicker_id, false
-    r.noRetouch = kicker_id ~= nil
+    local rule = r.config.referee.doubleTouchRule
+    local applies = rule == "all" or (rule == "restarts" and r.restartType ~= "kickoff")
+    r.noRetouch = kicker_id ~= nil and applies
+    r.restartBallTraveled = false
     r.restartEnteredField = false
     r.restartRemaining, r.restartElapsed, r.noPlayerElapsed = 0, 0, 0
     r.barrierEvacuationLogged = false
@@ -135,12 +164,13 @@ function referee.begin_goal(r, scoring_team)
     r.state = STATE_GOAL
     r.scoringTeam = scoring_team
     r.message = r.config.referee.messages.goal
+    announce(r, r.message, scoring_team)
     r.stateTimer = r.config.game.goalCelebrationSeconds
     r.pendingKickoffTeam = other_team(scoring_team)
     r.ballFrozen = false
     r.restartKickerId, r.noRetouch, r.restartKickerSeparated = nil, false, false
     r.restartRemaining, r.restartElapsed, r.noPlayerElapsed = 0, 0, 0
-    record(r, "ESTADO", old_state, STATE_GOAL, "gol do " .. (scoring_team == "red" and "vermelho" or "azul"))
+    record(r, "ESTADO", old_state, STATE_GOAL, r.decisionNotice)
 end
 
 function referee.end_period(r)
@@ -157,9 +187,10 @@ function referee.end_period(r)
         r.message = r.config.referee.messages.fulltime
         r.stateTimer = 0
     end
+    announce(r, r.message, nil)
     set_frozen_ball(r.ball, 0, 0)
-    record(r, "ESTADO", old_state, r.state, r.state == STATE_INTERVAL and "fim do 1º tempo" or "fim de jogo")
-    record(r, "REPOSICIONAMENTO_BOLA", r.state, r.state, "reposicionamento fim de tempo")
+    record(r, "ESTADO", old_state, r.state, r.decisionNotice)
+    record(r, "REPOSICIONAMENTO_BOLA", r.state, r.state, r.decisionNotice)
 end
 
 function referee.start_second_half(r)
@@ -195,7 +226,12 @@ function referee.reset_match(r)
 end
 
 function referee.note_touch(r, player)
-    if r.noRetouch and player.id == r.restartKickerId then return true end
+    if r.noRetouch and player.id == r.restartKickerId then
+        local dx, dy = r.ball.x - r.restartX, r.ball.y - r.restartY
+        local grace = r.config.referee.doubleTouchGraceDistance
+        if dx * dx + dy * dy > grace * grace then r.restartBallTraveled = true end
+        return r.restartBallTraveled
+    end
     r.lastTouchTeam = player.team
     r.lastToucherId = player.id
     if r.noRetouch and player.id ~= r.restartKickerId then r.noRetouch = false end
@@ -219,7 +255,10 @@ function referee.resolve_violation(r)
         kind = "corner"
     elseif kind == "kickoff" then kind, x, y = "kickoff", 0, 0
     else kind = "lateral" end
-    referee.begin_restart(r, kind, team, x, y, "toque duplo ou cobrança incorreta")
+    local cause = "COBRANÇA INCORRETA"
+    if r.restartBallTraveled then cause = "TOQUE DUPLO" end
+    local notice = cause .. " - SAQUE PARA " .. team_label(r, team)
+    referee.begin_restart(r, kind, team, x, y, notice)
 end
 
 local function goal_side_team(r, side)
@@ -311,6 +350,7 @@ end
 
 function referee.clock_tick(r, dt)
     r.matchElapsed = r.matchElapsed + dt
+    r.noticeTimer = math.max(0, r.noticeTimer - dt)
     if r.state == STATE_GOAL then
         if not r.regulationExpired then
             r.halfRemaining = math.max(0, r.halfRemaining - dt)

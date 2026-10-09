@@ -58,7 +58,8 @@ config.player = {
 config.ball = {
     radius = 10 * config.entityScale,
     mass = 1.0,
-    damping = 0.99,
+    damping = 0.984,
+    stop_speed_threshold = 1.0,
     wall_restitution = 0.5,
     post_restitution = 0.8,
     player_restitution = 0.5,
@@ -100,6 +101,9 @@ config.referee = {
     frozenRingRadius = 35, frozenRingPulseAmplitude = 2, frozenRingPulseRate = 4,
     frozenRingLineWidth = 6, frozenRingAlpha = 0.98, frozenRingFillAlpha = 0.28,
     zoneDirections = 32,
+    doubleTouchRule = "restarts", -- "off", "restarts" ou "all"
+    doubleTouchGraceDistance = 250,
+    decisionNoticeSeconds = 2,
     firstKickoffTeam = "red",
     teamName = { red = "VERMELHO", blue = "AZUL" },
     messages = {

@@ -201,7 +201,7 @@ function love.draw()
 
     -- Desenha HUD, placar e seletor de efeito
     ui_inst:draw_hud(game_inst, config.colors, vw, vh)
-    ui_inst:draw_referee(vw)
+    ui_inst:draw_referee(vw, vh)
 
     -- Overlay de debug (F3)
     ui_inst:draw_debug(last_dt, show_debug, game_inst)
