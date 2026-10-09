@@ -1,0 +1,18 @@
+HAXBALL RS — COMO JOGAR
+
+Extraia todos os arquivos desta pasta e execute Jogar.bat.
+No menu, escolha Criar sala no computador host. Nos outros PCs, escolha
+Entrar e selecione a sala encontrada ou informe IPv4:7777.
+
+O host recebe conexões de jogo pela porta UDP 7777. Para testar a rede,
+abra Teste de conexão no menu: pressione R no receptor (UDP 7779) e C
+no outro computador, digite o IPv4 exibido e pressione Enter.
+
+Controles: WASD move, Espaço chuta, setas ajustam o efeito e C centraliza.
+No menu da sala, 1 escolhe Vermelho, 2 Azul e 3 Espectador. O host usa F2
+para alternar o modo. TAB mostra o ping. Esc encerra o jogo.
+
+Se o Windows SmartScreen avisar, escolha Mais informações e Executar assim
+mesmo. O pacote não precisa de instalador nem de permissões de administrador.
+
+Distribuído com LÖVE 11.5. Consulte license.txt para os avisos de licença.
