@@ -929,6 +929,17 @@ function tests.run()
     end
 
     do
+        local discovery = require "net.discovery"
+        local valid = discovery.valid_address("192.168.1.25:7777") and
+            discovery.valid_address("10.0.0.2:65535")
+        local invalid = not discovery.valid_address("192.168.1.25") and
+            not discovery.valid_address("999.1.1.1:7777") and
+            not discovery.valid_address("192.168.1.25:0") and
+            not discovery.valid_address("127.0.0.1:7777")
+        assert_test("Descoberta aceita IPv4:porta valida e rejeita enderecos invalidos", valid and invalid)
+    end
+
+    do
         local referee = require "src.referee"
         local smoke_call_ok, smoke_ok, smoke_result = xpcall(function()
             local empty_saves = {
