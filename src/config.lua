@@ -136,6 +136,12 @@ config.calibration = {
     ballDampingStep = 0.005, playerDampingStep = 0.005,
     viewWidthStep = 50, cameraWeightStep = 0.05,
 }
+config.network = {
+    protocolVersion = 1, defaultPort = 7777, discoveryPort = 47778,
+    maxPlayers = 10, maxPeers = 16, inputKeepalive = 0.10,
+    snapshotRate = 30, timeoutSeconds = 10, interpolationDelay = 0.10,
+    simulatedLatencyMs = 0, simulatedPacketLoss = 0,
+}
 
 -- Quatro jogadores locais da versão-base; as formações suportam as futuras salas 3v3-5v5.
 config.players = {

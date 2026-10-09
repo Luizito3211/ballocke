@@ -8,6 +8,35 @@ local input_mod = require "src.input"
 local camera_mod = require "src.camera"
 local referee_mod = require "src.referee"
 
+local function rebuild_player_pairs(g)
+    g.player_pairs = {}
+    local index = 0
+    for i = 1, #g.players - 1 do
+        for j = i + 1, #g.players do
+            index = index + 1
+            g.player_pairs[index] = { p1 = g.players[i], p2 = g.players[j] }
+        end
+    end
+    g.num_player_pairs = index
+end
+
+local function player_data_for(config, index, team)
+    local source = config.players[(index - 1) % #config.players + 1]
+    local data = {}
+    for key, value in pairs(source) do data[key] = value end
+    data.id = "p" .. index
+    if team then data.team = team end
+    if index > #config.players or team then
+        local number = 0
+        for i = 1, index do
+            local other = i == index and data.team or config.players[(i - 1) % #config.players + 1].team
+            if other == data.team then number = number + 1 end
+        end
+        data.number = number
+    end
+    return data
+end
+
 function game.new(config, preset_name, num_players)
     local g = {}
     g.config = config
@@ -65,7 +94,7 @@ function game.set_mode(g, mode_name, num_players)
     g.ball.prev_x, g.ball.prev_y = g.ball.x, g.ball.y
 
     -- 3. Inicialização dos Jogadores e Comandos Pré-Alocados
-    num_players = math.min(num_players or #cfg.players, #cfg.players, formation.capacity * 2)
+    num_players = math.min(num_players or #cfg.players, formation.capacity * 2)
     g.players = {}
     g.commands = {}
 
@@ -73,7 +102,7 @@ function game.set_mode(g, mode_name, num_players)
     local blue_count = 0
 
     for i = 1, num_players do
-        local p_data = cfg.players[i]
+        local p_data = player_data_for(cfg, i)
         local spawn_x, spawn_y
 
         if p_data.team == "red" then
@@ -92,21 +121,44 @@ function game.set_mode(g, mode_name, num_players)
         g.players[i].prev_x, g.players[i].prev_y = spawn_x, spawn_y
         g.commands[i] = { moveX = 0, moveY = 0, kick = false, spinX = 0, spinY = 0 }
     end
+    g.next_player_serial = num_players + 1
 
     -- 4. Pré-computação dos pares de colisão jogador x jogador (Zero alocação no update)
-    g.player_pairs = {}
-    local pair_idx = 0
-    for i = 1, #g.players - 1 do
-        for j = i + 1, #g.players do
-            pair_idx = pair_idx + 1
-            g.player_pairs[pair_idx] = { p1 = g.players[i], p2 = g.players[j] }
-        end
-    end
-    g.num_player_pairs = pair_idx
+    rebuild_player_pairs(g)
 
     g:reset_positions()
     g.referee = referee_mod.new(cfg, g.field, g.ball, g.players)
     if g.camera then g.camera.field = g.field; g.camera.initialized = false end
+end
+
+function game.add_player(g, team)
+    local capacity = g.team_capacity
+    if team ~= "red" and team ~= "blue" then return nil, "time inválido" end
+    local team_count = 0
+    for i = 1, #g.players do if g.players[i].team == team then team_count = team_count + 1 end end
+    if team_count >= capacity then return nil, "time cheio" end
+    local index = #g.players + 1
+    local positions = g.formation[team]
+    local spawn = positions[team_count + 1]
+    local data = player_data_for(g.config, index, team)
+    data.id = "net" .. g.next_player_serial
+    g.next_player_serial = g.next_player_serial + 1
+    local p = player_mod.new(data, g.config, spawn.x, spawn.y)
+    p.prev_x, p.prev_y = p.x, p.y
+    g.players[index] = p
+    g.commands[index] = { moveX = 0, moveY = 0, kick = false, spinX = 0, spinY = 0 }
+    g.referee.players = g.players
+    rebuild_player_pairs(g)
+    return index, p
+end
+
+function game.remove_player(g, index)
+    if index < 1 or index > #g.players then return false end
+    table.remove(g.players, index)
+    table.remove(g.commands, index)
+    g.referee.players = g.players
+    rebuild_player_pairs(g)
+    return true
 end
 
 -- Reinicia posições para o início da jogada (kick-off)
@@ -486,7 +538,9 @@ function game.draw(g, show_colliders, alpha)
     -- 3. Jogadores
     for i = 1, #g.players do
         local p = g.players[i]
-        p:draw(colors, p.prev_x + (p.x - p.prev_x) * alpha, p.prev_y + (p.y - p.prev_y) * alpha)
+        if p.online_visible ~= false then
+            p:draw(colors, p.prev_x + (p.x - p.prev_x) * alpha, p.prev_y + (p.y - p.prev_y) * alpha)
+        end
     end
 
     -- 4. Bola

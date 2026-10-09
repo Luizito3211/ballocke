@@ -217,7 +217,7 @@ function ui.draw_spin_selector(u, game_state, colors, virtual_width, virtual_hei
     local btn_r = 10
 
     -- Identifica o jogador a exibir (prioriza quem está na posse ou P1)
-    local active_player = game_state.players and game_state.players[1]
+    local active_player = game_state.players and game_state.players[game_state.local_player_index or 1]
     if not active_player or not active_player.allow_spin then return end
     local sx = (active_player and active_player.spin_x) or 0
     local sy = (active_player and active_player.spin_y) or 0

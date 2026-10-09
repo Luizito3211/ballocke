@@ -24,13 +24,6 @@ function discovery.new(role, port)
         self.sender = udp
         pcall(udp.setoption, udp, "broadcast", true)
         pcall(udp.settimeout, udp, 0)
-        local listener_ok, listener = pcall(socket.udp)
-        if listener_ok and listener then
-            pcall(listener.setoption, listener, "reuseaddr", true)
-            pcall(listener.settimeout, listener, 0)
-            local bound = listener:setsockname("*", self.port)
-            if bound then self.listener = listener else listener:close() end
-        end
     else
         local ok, udp = pcall(socket.udp)
         if not ok or not udp then return nil, "Não foi possível escutar anúncios de salas." end
@@ -43,8 +36,8 @@ function discovery.new(role, port)
     return self
 end
 
-local function valid_ipv4(ip)
-    if type(ip) ~= "string" or not ip:match("^%d+%.%d+%.%d+%.%d+$") or ip:match("^127%.") then return false end
+local function valid_ipv4(ip, allow_loopback)
+    if type(ip) ~= "string" or not ip:match("^%d+%.%d+%.%d+%.%d+$") or (not allow_loopback and ip:match("^127%.")) then return false end
     for part in ip:gmatch("%d+") do if tonumber(part) > 255 then return false end end
     return true
 end
@@ -82,10 +75,6 @@ function Discovery:announce(name, room_port, players, mode)
     name = tostring(name or "Sala RS"):gsub("[^%w _%-]", ""):sub(1, 24)
     local packet = string.format("HBRS|1|%d|%d|%s|%s", room_port, players or 1, mode or "2v2", name)
     local sent = self.sender:sendto(packet, "255.255.255.255", self.port)
-    if not sent then
-        -- Alguns roteadores não encaminham o broadcast limitado; tente também o broadcast da sub-rede.
-        self.sender:sendto(packet, "192.168.255.255", self.port)
-    end
     return sent ~= nil
 end
 
@@ -96,12 +85,6 @@ function Discovery:update(dt, room_port, players, mode)
         if self.elapsed >= 1 then
             self.elapsed = 0
             self:announce("Sala RS", room_port, players, mode)
-            if self.listener then
-                for _ = 1, 8 do
-                    local _, ip = self.listener:receivefrom()
-                    if not ip then break end
-                end
-            end
         end
         return
     end
@@ -141,7 +124,7 @@ end
 function discovery.valid_address(address)
     if type(address) ~= "string" then return false end
     local ip, port = address:match("^([%d%.]+):(%d+)$")
-    if not ip or not valid_ipv4(ip) then return false end
+    if not ip or not valid_ipv4(ip, true) then return false end
     port = tonumber(port)
     return port and port >= 1 and port <= 65535
 end

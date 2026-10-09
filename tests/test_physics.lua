@@ -195,9 +195,9 @@ function tests.run()
         local modes_ok = true
         for i = 1, #config.mode_names do
             local mode = config.mode_names[i]
-            local g = game_mod.new(config, mode, #config.players)
             local capacity = tonumber((string.sub(mode, 1, 1)))
-            local expected_players = math.min(4, capacity * 2)
+            local g = game_mod.new(config, mode, capacity * 2)
+            local expected_players = math.min(10, capacity * 2)
             if g.team_capacity ~= capacity or #g.players ~= expected_players or
                g.field.outer_width ~= f.outer_width or g.field.outer_height ~= f.outer_height then
                 modes_ok = false
@@ -935,8 +935,104 @@ function tests.run()
         local invalid = not discovery.valid_address("192.168.1.25") and
             not discovery.valid_address("999.1.1.1:7777") and
             not discovery.valid_address("192.168.1.25:0") and
-            not discovery.valid_address("127.0.0.1:7777")
+            discovery.valid_address("127.0.0.1:7777")
         assert_test("Descoberta aceita IPv4:porta valida e rejeita enderecos invalidos", valid and invalid)
+    end
+
+    do
+        local protocol = require "net.protocol"
+        local command = { moveX = -1, moveY = 1, kick = true, spinX = 0.5, spinY = -1 }
+        local packet = protocol.pack_input(65534, command)
+        local decoded = {}
+        local input_ok = protocol.unpack_input(packet, decoded) and decoded.seq == 65534 and
+            decoded.moveX == -1 and decoded.moveY == 1 and decoded.kick and
+            math.abs(decoded.spinX - 0.5) < 0.01 and decoded.spinY == -1 and
+            not protocol.unpack_input(packet:sub(1, #packet - 1), {})
+        local kind, version, player_index = protocol.unpack_handshake(protocol.pack_welcome(4))
+        local handshake_ok = kind == "welcome" and version == protocol.VERSION and player_index == 4
+        assert_test("Protocolo serializa INPUT validado e handshake com versao/protocolo", input_ok and handshake_ok)
+    end
+
+    do
+        local protocol = require "net.protocol"
+        local g = game_mod.new(config, "5v5", 10)
+        g.ball.x, g.ball.y, g.ball.vx, g.ball.vy = -123.25, 55.5, 210, -32
+        g.score_p1, g.score_p2 = 3, 2
+        g.players[10].x, g.players[10].y = 1111.25, -444.5
+        local packet = protocol.pack_snapshot(g, 512, 256)
+        local decoded = protocol.new_snapshot()
+        local ok = #packet == protocol.SNAPSHOT_SIZE and protocol.unpack_snapshot(packet, decoded)
+        assert_test("Snapshot compacto transmite dez jogadores, bola, placar e estado sem truncar int16",
+            ok and decoded.sequence == 512 and decoded.acknowledgedSequence == 256 and
+            decoded.playerCount == 10 and math.abs(decoded.ballX + 123.25) < 0.01 and
+            decoded.scoreRed == 3 and decoded.scoreBlue == 2 and
+            math.abs(decoded.players[10].x - 1111.25) < 0.01 and
+            not protocol.unpack_snapshot(packet:sub(1, #packet - 1), decoded))
+    end
+
+    do
+        local protocol = require "net.protocol"
+        local session_mod = require "net.session"
+        local sent, peer = nil, {}
+        local room = { endpoint = { send = function(_, _, packet) sent = packet; return true end },
+            set_lobby_state = function() end }
+        local g = game_mod.new(config, "2v2", 1)
+        local host = session_mod.new_host(room, g, config)
+        host:_host_accept(peer, protocol.VERSION)
+        local accepted = host.peers[peer] and host.peers[peer].index == 2 and #g.players == 2
+        host:_host_packet(peer, protocol.pack_input(7, { moveX = 1, moveY = -1, kick = true, spinX = 0.5, spinY = 0 }))
+        host:apply_host_inputs()
+        local command = g.commands[2]
+        local applied = command.moveX == 1 and command.moveY == -1 and command.kick and command.spinX > 0.49
+        local unknown_peer = {}
+        host:_host_accept(unknown_peer, protocol.VERSION + 1)
+        local refused = sent and sent:sub(1, 1) == "E" and host.peers[unknown_peer] == nil
+        assert_test("Host aceita comandos validados, limita entrada a jogadores e recusa protocolo divergente",
+            accepted and applied and refused)
+    end
+
+    do
+        local transport = require "net.transport"
+        local session_mod = require "net.session"
+        local socket = require "socket"
+        local probe = socket.udp()
+        local bound = probe:setsockname("*", 0)
+        local _, port = probe:getsockname()
+        probe:close()
+        local host_endpoint, host_error = bound and transport.host(port, 16, 2) or nil
+        local client_endpoint, client_error = host_endpoint and transport.connect("127.0.0.1:" .. tostring(port), 2) or nil
+        local connected, server_players, client_snapshot = false, 1, false
+        if host_endpoint and client_endpoint then
+            local host_game = game_mod.new(config, "2v2", 1)
+            local client_game = game_mod.new(config, "5v5", 10)
+            local host_room = { endpoint = host_endpoint, set_lobby_state = function() end,
+                close = function() host_endpoint:close() end }
+            local client_room = { endpoint = client_endpoint, update = function() end,
+                close = function() client_endpoint:close() end }
+            local host = session_mod.new_host(host_room, host_game, config)
+            local client = session_mod.new_client(client_room, client_game, config)
+            local command = { moveX = 1, moveY = 0, kick = false, spinX = 0, spinY = 0 }
+            for _ = 1, 180 do
+                client:update(1 / 60, command)
+                host:update(1 / 60)
+                host:apply_host_inputs()
+                host_game:step_fixed(config.fixed_dt, host_game.commands)
+                host:after_host_tick()
+                client:update(0, command)
+                client:apply_snapshot()
+                connected = client.connected
+                server_players = #host_game.players
+                client_snapshot = client.hasSnapshot
+                if connected and client_snapshot and host_game.players[2].x > 950 then break end
+                love.timer.sleep(0.001)
+            end
+            host:close()
+            client:close()
+        end
+        assert_test("Loopback ENet host/client: handshake, input e snapshot em localhost",
+            connected and server_players == 2 and client_snapshot and not host_error and not client_error,
+            string.format("conectado=%s, jogadores=%d, snapshot=%s, host=%s, cliente=%s",
+                tostring(connected), server_players, tostring(client_snapshot), tostring(host_error), tostring(client_error)))
     end
 
     do

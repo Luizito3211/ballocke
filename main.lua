@@ -8,6 +8,8 @@ local calibration_mod = require "src.calibration"
 local preferences = require "src.preferences"
 local referee_mod = require "src.referee"
 local EventLog = require "src.event_log"
+local net_lobby = require "net.lobby"
+local net_session_mod = require "net.session"
 
 local game_inst
 local ui_inst
@@ -15,6 +17,10 @@ local calibration_inst
 local referee_panel_open = false
 local referee_test_touch = 1
 local event_log
+local network_session
+local app_screen = "menu"
+local network_error = ""
+local network_command = { moveX = 0, moveY = 0, kick = false, spinX = 0, spinY = 0 }
 
 local accumulator = 0
 local screen_scale = 1
@@ -40,7 +46,7 @@ local function set_test_half(r, one_minute)
     r.regulationExpired, r.graceRemaining = false, config.referee.regulationGrace
 end
 
-function love.initialize_game(filesystem, num_players, game_config)
+function love.initialize_game(filesystem, num_players, game_config, no_event_log)
     local active_config = game_config or config
     config.camera.viewWidth = preferences.read_view_width(config, filesystem)
     local mode = num_players == 1 and "1v1" or (num_players == 10 and "5v5" or active_config.default_mode)
@@ -51,12 +57,39 @@ function love.initialize_game(filesystem, num_players, game_config)
     calibration_inst = calibration_mod.new(active_config, game_inst)
     ui_inst:update_score(game_inst.score_p1, game_inst.score_p2)
     ui_inst:update_referee(game_inst.referee)
-    if filesystem == nil then
+    if filesystem == nil and not no_event_log then
         event_log = EventLog.new(love.filesystem, active_config.eventLog)
         referee_mod.attach_event_log(game_inst.referee, event_log)
     end
     love.resize(love.graphics.getDimensions())
     return game_inst
+end
+
+function love.start_host(port)
+    port = tonumber(port) or config.network.defaultPort
+    local room, err = net_lobby.host(port, "Sala RS", config.network.discoveryPort)
+    if not room then network_error, app_screen = err, "menu"; return false end
+    love.initialize_game(nil, 1, nil, true)
+    game_inst:set_mode("2v2", 1)
+    game_inst.is_training = false
+    event_log = EventLog.new(love.filesystem, config.eventLog)
+    referee_mod.attach_event_log(game_inst.referee, event_log)
+    network_session = net_session_mod.new_host(room, game_inst, config)
+    network_session.localCommand = network_command
+    app_screen, network_error = "host", ""
+    ui_inst:update_referee(game_inst.referee)
+    return true
+end
+
+function love.start_join(address)
+    local room, err = net_lobby.join(address)
+    if not room then network_error, app_screen = err, "menu"; return false end
+    love.initialize_game(nil, 10, nil, true)
+    game_inst.is_training = false
+    network_session = net_session_mod.new_client(room, game_inst, config)
+    network_session.localCommand = network_command
+    app_screen, network_error = "client", ""
+    return true
 end
 
 -- Harness usado somente por --test para renderizar overlays sem alterar o jogo normal.
@@ -89,7 +122,12 @@ function love.load(arg, unfiltered_arg)
     spin_keyboard_enabled = (config.spin_selector and config.spin_selector.local_keyboard_enabled) or false
 
     -- Inicialização do jogo e interface
-    love.initialize_game()
+    local arguments = arg or unfiltered_arg or _G.arg or {}
+    for i = 1, #arguments do
+        if arguments[i] == "--host" then love.start_host(arguments[i + 1] or config.network.defaultPort); return end
+        if arguments[i] == "--join" then love.start_join(arguments[i + 1] or ""); return end
+    end
+    app_screen = "menu"
 end
 
 function love.resize(w, h)
@@ -108,72 +146,74 @@ function love.update(dt)
     if event_log then event_log:update(dt) end
     last_dt = dt
     if referee_panel_open then return end
-    if calibration_inst and calibration_inst.open then
-    local followed = game_inst.players[1]
-    local alpha = accumulator / config.fixed_dt
-    local px = followed.prev_x + (followed.x - followed.prev_x) * alpha
-    local py = followed.prev_y + (followed.y - followed.prev_y) * alpha
-    local bx = game_inst.ball.prev_x + (game_inst.ball.x - game_inst.ball.prev_x) * alpha
-    local by = game_inst.ball.prev_y + (game_inst.ball.y - game_inst.ball.prev_y) * alpha
-    camera_mod.update(game_inst.camera, px, py, bx, by, dt)
+
+    local target_index = network_session and network_session.role == "client" and network_session.localPlayerIndex > 0 and
+        network_session.localPlayerIndex or 1
+    local target_p = game_inst.players and game_inst.players[target_index]
+    game_inst.local_player_index = network_session and network_session.role == "client" and
+        network_session.localPlayerIndex or 1
+    if network_session and network_session.role == "client" and target_p then target_p.allow_spin = true end
+    if network_session and network_session.role == "host" then network_session:update(dt) end
+
+    if calibration_inst and calibration_inst.open and not network_session then
+        local alpha = accumulator / config.fixed_dt
+        local px = target_p and (target_p.prev_x + (target_p.x - target_p.prev_x) * alpha) or game_inst.ball.x
+        local py = target_p and (target_p.prev_y + (target_p.y - target_p.prev_y) * alpha) or game_inst.ball.y
+        local bx = game_inst.ball.prev_x + (game_inst.ball.x - game_inst.ball.prev_x) * alpha
+        local by = game_inst.ball.prev_y + (game_inst.ball.y - game_inst.ball.prev_y) * alpha
+        camera_mod.update(game_inst.camera, px, py, bx, by, dt)
         return
     end
 
-    -- 1. Captura e processamento do mouse no seletor de efeito (coordenadas virtuais)
     local win_mx, win_my = love.mouse.getPosition()
     local vmx = (win_mx - offset_x) / screen_scale
     local vmy = (win_my - offset_y) / screen_scale
     local is_mouse_down = love.mouse.isDown(1)
-
-    local target_p = game_inst.players and game_inst.players[1]
-    local vw = config.viewport.width
-    local vh = config.viewport.height
-    local r = (config.spin_selector and config.spin_selector.radius) or 40
-    local widget_cx = vw - 60
-    local widget_cy = vh - 60
-    local btn_x = widget_cx - r - 16
-    local btn_y = widget_cy + r * 0.4
-    local btn_r = 10
-
-    input_mod.handle_mouse_spin(target_p, vmx, vmy, is_mouse_down, mouse_just_pressed, widget_cx, widget_cy, r, btn_x, btn_y, btn_r)
+    local vw, vh = config.viewport.width, config.viewport.height
+    local r = config.spin_selector.radius
+    local widget_cx, widget_cy = vw - 60, vh - 60
+    local btn_x, btn_y, btn_r = widget_cx - r - 16, widget_cy + r * 0.4, 10
+    input_mod.handle_mouse_spin(target_p, vmx, vmy, is_mouse_down, mouse_just_pressed,
+        widget_cx, widget_cy, r, btn_x, btn_y, btn_r)
     mouse_just_pressed = false
 
-    -- 2. Atualização opcional de efeito pelo teclado
-    local spd = (config.spin_selector and config.spin_selector.move_speed) or 2.0
-    input_mod.update_keyboard_spin(target_p, dt, spd, spin_keyboard_enabled)
-
-    -- 3. Acumulador de tempo fixo (1/60s)
-    accumulator = accumulator + math.min(dt, config.max_dt_acc)
-
-    local steps = 0
-    while accumulator >= config.fixed_dt and steps < config.max_physics_steps do
-        -- Polling dos comandos para cada jogador (separação estrita de simulação e input)
-        for i = 1, #game_inst.players do
-            input_mod.poll_player_command(game_inst.players[i], game_inst.commands[i])
+    input_mod.update_keyboard_spin(target_p, dt, config.spin_selector.move_speed, spin_keyboard_enabled)
+    if network_session and network_session.role == "client" then
+        local mx, my, kick = input_mod.get_movement_and_kick(config.players[1].keys)
+        network_command.moveX, network_command.moveY, network_command.kick = mx, my, kick
+        network_command.spinX, network_command.spinY = target_p.spin_x, target_p.spin_y
+        network_session:update(dt, network_command)
+        network_session:apply_snapshot()
+        accumulator = 0
+    else
+        accumulator = accumulator + math.min(dt, config.max_dt_acc)
+        local steps = 0
+        while accumulator >= config.fixed_dt and steps < config.max_physics_steps do
+            input_mod.poll_player_command(game_inst.players[1], game_inst.commands[1])
+            if network_session then network_session:apply_host_inputs() end
+            game_inst:step_fixed(config.fixed_dt, game_inst.commands)
+            if network_session then network_session:after_host_tick() end
+            accumulator = accumulator - config.fixed_dt
+            steps = steps + 1
         end
-
-        -- Execução da simulação determinística
-        game_inst:step_fixed(config.fixed_dt, game_inst.commands)
-
-        accumulator = accumulator - config.fixed_dt
-        steps = steps + 1
     end
 
-    local followed = game_inst.players[1]
+    local follow_index = network_session and network_session.role == "client" and network_session.localPlayerIndex or 1
+    local followed = follow_index > 0 and game_inst.players[follow_index] or nil
     local alpha = accumulator / config.fixed_dt
-    local px = followed.prev_x + (followed.x - followed.prev_x) * alpha
-    local py = followed.prev_y + (followed.y - followed.prev_y) * alpha
+    local px = followed and (followed.prev_x + (followed.x - followed.prev_x) * alpha) or game_inst.ball.x
+    local py = followed and (followed.prev_y + (followed.y - followed.prev_y) * alpha) or game_inst.ball.y
     local bx = game_inst.ball.prev_x + (game_inst.ball.x - game_inst.ball.prev_x) * alpha
     local by = game_inst.ball.prev_y + (game_inst.ball.y - game_inst.ball.prev_y) * alpha
     camera_mod.update(game_inst.camera, px, py, bx, by, dt)
 
-    -- 4. Camada de apresentação: calcula linha de trajetória da posse e placar
-    game_inst:update_presentation()
+    if not network_session or network_session.role == "host" then game_inst:update_presentation() end
     ui_inst:update_score(game_inst.score_p1, game_inst.score_p2)
     ui_inst:update_referee(game_inst.referee)
 end
 
 function love.quit()
+    if network_session then network_session:close() end
     if event_log then event_log:flush() end
 end
 
@@ -222,6 +262,22 @@ function love.draw()
     end
     if calibration_inst and calibration_inst.open then calibration_inst:draw(vw, vh) end
     if referee_panel_open then ui_inst:draw_test_panel(vw, vh) end
+    if network_session and network_session.role == "host" then
+        love.graphics.setFont(ui_inst.font_ref)
+        love.graphics.setColor(1, 0.95, 0.65, 1)
+        love.graphics.printf("SALA RS  |  " .. tostring(network_session.room.port) .. "  |  MODO " .. game_inst.mode_name,
+            30, 158, vw - 60, "center")
+        for i = 1, #network_session.room.addresses do
+            love.graphics.printf(network_session.room.addresses[i] .. ":" .. tostring(network_session.room.port),
+                30, 184 + (i - 1) * 24, vw - 60, "center")
+        end
+        love.graphics.printf(network_session.message, 30, 184 + #network_session.room.addresses * 24,
+            vw - 60, "center")
+        love.graphics.setFont(ui_inst.font_hud)
+    elseif network_session and network_session.role == "client" and not network_session.hasSnapshot then
+        love.graphics.setColor(1, 0.95, 0.65, 1)
+        love.graphics.printf(network_session.message, 60, 160, vw - 120, "center")
+    end
     love.graphics.setScissor()
     love.graphics.pop()
 end

@@ -33,13 +33,13 @@ function transport.connect(address, channels)
 end
 
 function Endpoint:send(peer, payload, reliable)
-    if self.closed or type(payload) ~= "string" then return false end
+    if self.closed then return false end
     if self.role == "client" then
         reliable = payload
         payload = peer
         peer = self.peer
     end
-    if not peer then return false end
+    if not peer or type(payload) ~= "string" then return false end
     local channel = reliable and 1 or 0
     local flags = reliable and "reliable" or nil
     local ok, sent = pcall(peer.send, peer, payload, channel, flags)
@@ -50,6 +50,12 @@ function Endpoint:receive(timeout)
     if self.closed then return nil end
     local event, peer, channel, data = self.host:service(timeout or 0)
     if not event then return nil end
+    -- lua-enet (bundled by LÖVE) normally returns one event table. Accept tuple
+    -- returns too, so the adapter remains easy to fake in tests.
+    if type(event) == "table" then
+        local row = event
+        return row.type, row.peer, row.channel, row.data
+    end
     return event, peer, channel, data
 end
 
