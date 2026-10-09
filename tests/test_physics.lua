@@ -678,18 +678,69 @@ function tests.run()
         local referee = require "src.referee"
         local g = game_mod.new(config, "1v1", 2)
         local r = g.referee
-        referee.begin_play(r, nil)
-        r.halfRemaining = config.fixed_dt
+        local kinds = { "lateral", "corner", "goal_kick", "kickoff" }
+        local paused = true
+        local before = r.halfRemaining
+        for i = 1, #kinds do
+            referee.begin_restart(r, kinds[i], "red", 0, 0)
+            before = r.halfRemaining
+            referee.clock_tick(r, 1.25)
+            if referee.isClockRunning(r) or r.halfRemaining ~= before then paused = false end
+        end
+        assert_test("Relogio pausa em lateral, escanteio, tiro de meta e saque inicial", paused)
+    end
+
+    do
+        local referee = require "src.referee"
+        local g = game_mod.new(config, "1v1", 2)
+        local r = g.referee
+        referee.begin_restart(r, "kickoff", "red", 0, 0)
+        local player = g.players[1]
+        player.x, player.y = g.ball.x - player.radius - g.ball.radius + 1, g.ball.y
+        local before = r.halfRemaining
+        g.commands[1].kick = true
         g:step_fixed(config.fixed_dt, g.commands)
-        local grace_started = r.regulationExpired and r.state == referee.STATE_PLAY and r.graceRemaining == config.referee.regulationGrace
-        local stoppage_ends_now = referee.ball_stopped(r) and r.state == referee.STATE_INTERVAL
+        local entered_play = r.state == referee.STATE_PLAY and referee.isClockRunning(r) and r.halfRemaining == before
+        g.commands[1].kick = false
+        g:step_fixed(config.fixed_dt, g.commands)
+        assert_test("Relogio volta a avancar no chute real do cobrador", entered_play and r.halfRemaining == before - config.fixed_dt)
+    end
+
+    do
+        local referee = require "src.referee"
+        local g = game_mod.new(config, "1v1", 2)
+        local r = g.referee
+        referee.begin_play(r, nil)
+        r.halfRemaining = 20
+        referee.begin_goal(r, "red")
+        referee.clock_tick(r, 3)
+        assert_test("Relogio permanece congelado durante a comemoracao do gol",
+            not referee.isClockRunning(r) and r.halfRemaining == 20 and r.stateTimer == config.game.goalCelebrationSeconds - 3)
+    end
+
+    do
+        local referee = require "src.referee"
+        local g = game_mod.new(config, "1v1", 2)
+        local r = g.referee
+        referee.begin_restart(r, "lateral", "red", 0, 0)
+        r.halfRemaining = 0.25
+        referee.clock_tick(r, 5)
+        local stayed_stopped = r.state == referee.STATE_LATERAL and r.halfRemaining == 0.25
+        referee.begin_play(r, g.players[1].id)
+        local transition = referee.clock_tick(r, 0.25)
+        assert_test("Tempo nao zera durante bola parada; fim ocorre ao esgotar em jogo corrido",
+            stayed_stopped and transition == nil and r.state == referee.STATE_PLAY and
+            r.regulationExpired and r.halfRemaining == 0)
+        referee.begin_restart(r, "corner", "red", 0, 0)
+        local ends_at_stoppage = referee.ball_stopped(r) and r.state == referee.STATE_INTERVAL
         referee.start_second_half(r)
         referee.begin_play(r, nil)
         r.halfRemaining = config.fixed_dt
-        g:step_fixed(config.fixed_dt, g.commands)
-        local maximum_grace = referee.clock_tick(r, config.referee.regulationGrace + config.fixed_dt)
-        assert_test("Relógio encerra na próxima parada ou no limite de 15 s", grace_started and stoppage_ends_now and
-            maximum_grace == "period_end" and r.state == referee.STATE_FINISHED)
+        referee.clock_tick(r, config.fixed_dt)
+        local ends_after_maximum_play = referee.clock_tick(r, config.referee.regulationGrace + config.fixed_dt) == "period_end" and
+            r.state == referee.STATE_FINISHED
+        assert_test("Fim regulamentar ocorre na parada seguinte ou apos o limite de jogo corrido",
+            ends_at_stoppage and ends_after_maximum_play)
     end
 
     do
@@ -701,6 +752,7 @@ function tests.run()
         referee.begin_play(r, nil)
         local ticks = 0
         while r.state ~= referee.STATE_FINISHED and ticks < 12000 do
+            if r.state == referee.STATE_KICKOFF then referee.begin_play(r, nil) end
             g:step_fixed(config.fixed_dt, g.commands)
             ticks = ticks + 1
         end
@@ -824,9 +876,9 @@ function tests.run()
         for _ = 1, math.floor(config.game.goalCelebrationSeconds / config.fixed_dt) + 1 do
             g:step_fixed(config.fixed_dt, g.commands)
         end
-        local ends_match = r.state == referee.STATE_INTERVAL and r.regulationExpired and
+        local clock_stays_frozen = r.state == referee.STATE_KICKOFF and r.halfRemaining == config.fixed_dt and
             g.players[1].x == g.players[1].spawn_x
-        assert_test("Comemoração de 7 s mantém movimento sem eventos/gols duplicados, repõe tudo e encerra tempo expirado", active and ends_match)
+        assert_test("Comemoracao mantem relogio congelado e inicia o saque apos 7 s", active and clock_stays_frozen)
     end
 
     do

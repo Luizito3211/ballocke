@@ -111,6 +111,10 @@ function referee.is_restart_state(state)
            state == STATE_CORNER or state == STATE_KICKOFF
 end
 
+function referee.isClockRunning(r)
+    return r.state == STATE_PLAY
+end
+
 function referee.begin_restart(r, kind, team, x, y, reason)
     local cfg, ball = r.config, r.ball
     local old_state, old_x, old_y = r.state, ball.x, ball.y
@@ -352,10 +356,6 @@ function referee.clock_tick(r, dt)
     r.matchElapsed = r.matchElapsed + dt
     r.noticeTimer = math.max(0, r.noticeTimer - dt)
     if r.state == STATE_GOAL then
-        if not r.regulationExpired then
-            r.halfRemaining = math.max(0, r.halfRemaining - dt)
-            if r.halfRemaining <= 0 then r.regulationExpired = true; r.graceRemaining = r.config.referee.regulationGrace end
-        end
         r.stateTimer = r.stateTimer - dt
         if r.stateTimer > 0 then return nil end
         if r.regulationExpired then referee.end_period(r); return "period_end" end
@@ -373,18 +373,19 @@ function referee.clock_tick(r, dt)
         end
     end
 
-    if r.state == STATE_PLAY or referee.is_restart_state(r.state) then
+    if referee.isClockRunning(r) then
         if not r.regulationExpired then
-            r.halfRemaining = r.halfRemaining - dt
+            r.halfRemaining = math.max(0, r.halfRemaining - dt)
             if r.halfRemaining <= 0 then
-                r.halfRemaining = 0
                 r.regulationExpired = true
                 r.graceRemaining = r.config.referee.regulationGrace
-                if referee.is_restart_state(r.state) then referee.end_period(r); return "period_end" end
             end
         else
             r.graceRemaining = r.graceRemaining - dt
-            if r.graceRemaining <= 0 then referee.end_period(r); return "period_end" end
+            if r.graceRemaining <= 0 then
+                referee.end_period(r)
+                return "period_end"
+            end
         end
     end
     return nil

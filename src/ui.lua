@@ -1,5 +1,6 @@
 -- src/ui.lua: Interface do usuário (HUD, placar, seletor de efeito 8-Ball Pool e overlay F3)
 local ui = {}
+local referee_mod = require "src.referee"
 
 function ui.new(config)
     local u = {}
@@ -65,11 +66,14 @@ function ui.update_referee(u, r)
         u.notice_color[1], u.notice_color[2], u.notice_color[3] = 1, 1, 1
     end
     local sec = math.floor(math.max(0, r.halfRemaining) + 0.999)
-    if sec ~= u.ref_second then
+    local clock_running = referee_mod.isClockRunning(r)
+    if sec ~= u.ref_second or clock_running ~= u.clock_running then
         u.ref_second = sec
+        u.clock_running = clock_running
         local minute, second = math.floor(sec / 60), sec % 60
         local half = r.half == 1 and "1º TEMPO" or "2º TEMPO"
-        u.text_clock:set(string.format("%s  %02d:%02d", half, minute, second))
+        local indicator = clock_running and "" or "  PAUSADO"
+        u.text_clock:set(string.format("%s  %02d:%02d%s", half, minute, second, indicator))
     end
     local msg = r.message or ""
     if u.current_ref_message ~= msg then
@@ -101,7 +105,10 @@ function ui.draw_referee(u, virtual_width, virtual_height)
     love.graphics.setColor(1, 1, 1, 1)
     local w = u.text_referee:getWidth()
     love.graphics.draw(u.text_referee, virtual_width / 2 - w / 2, 76)
+    if u.clock_running then love.graphics.setColor(0.92, 0.92, 0.92, 1)
+    else love.graphics.setColor(0.62, 0.68, 0.72, 1) end
     love.graphics.draw(u.text_clock, virtual_width / 2 - u.text_clock:getWidth() / 2, 108)
+    love.graphics.setColor(1, 1, 1, 1)
     if u.text_restart_clock:getWidth() > 0 then
         love.graphics.draw(u.text_restart_clock, virtual_width / 2 - u.text_restart_clock:getWidth() / 2, 136)
     end
