@@ -1,16 +1,15 @@
 -- Sessão host autoritativa, com INPUT não confiável e SNAPSHOT a 30 Hz.
 local protocol = require "net.protocol"
 local interpolation = require "net.interpolation"
+local simulator_mod = require "net.simulator"
 local physics = require "src.physics"
 local session = {}
 local Session = {}
 Session.__index = Session
 local ZERO_COMMAND = { moveX = 0, moveY = 0, kick = false, spinX = 0, spinY = 0 }
-local SNAPSHOT_BUFFER_SIZE = 8
-
-local function new_snapshot_buffer()
+local function new_snapshot_buffer(capacity)
     local buffer = {}
-    for i = 1, SNAPSHOT_BUFFER_SIZE do
+    for i = 1, capacity do
         buffer[i] = { state = protocol.new_snapshot(), time = 0 }
     end
     return buffer
@@ -26,11 +25,41 @@ local function sequence_is_newer(sequence, previous)
     return delta > 0 and delta < 32768
 end
 
+local function set_player_team(game, index, team)
+    local p = game.players[index]
+    if not p or (team ~= "red" and team ~= "blue") then return false end
+    p.team = team
+    local count = 0
+    for i = 1, index do if game.players[i].team == team then count = count + 1 end end
+    p.number = count
+    for i = 1, #game.config.players do
+        local candidate = game.config.players[i]
+        if candidate.team == team then p.color, p.inner_color = candidate.color, candidate.inner_color; break end
+    end
+    local positions = team == "red" and game.formation.red or game.formation.blue
+    local position = positions[math.min(count, #positions)]
+    p.x, p.y, p.prev_x, p.prev_y = position.x, position.y, position.x, position.y
+    p.spawn_x, p.spawn_y = position.x, position.y
+    p.vx, p.vy = 0, 0
+    return true
+end
+
+local function team_is_full(game, team, excluded_index)
+    local count = 0
+    for i = 1, #game.players do
+        if i ~= excluded_index and game.players[i].team == team then count = count + 1 end
+    end
+    return count >= game.team_capacity
+end
+
 function session.new_host(room, game, config)
     game.is_training, game.is_online_host = false, true
     return setmetatable({ role = "host", room = room, game = game, config = config,
+        simulator = simulator_mod.new(config.network.simulatedLatencyMs, config.network.simulatedPacketLoss,
+            config.network.simulatorQueueSize, config.network.simulatorSeed),
         peers = {}, elapsed = 0, snapshotElapsed = 0, sequence = 0,
         lastState = game.referee.state, localPlayerIndex = 1, closed = false,
+        teamMenuOpen = false, localTeamMenuOpen = false,
         message = "Aguardando jogadores" }, Session)
 end
 
@@ -38,12 +67,15 @@ function session.new_client(room, game, config)
     game.is_training, game.is_online_client = false, true
     for i = 1, #game.players do game.players[i].online_visible = false end
     return setmetatable({ role = "client", room = room, game = game, config = config,
+        simulator = simulator_mod.new(config.network.simulatedLatencyMs, config.network.simulatedPacketLoss,
+            config.network.simulatorQueueSize, config.network.simulatorSeed),
         elapsed = 0, connectElapsed = 0, inputElapsed = 0, inputSequence = 0,
         lastInput = { moveX = 99, moveY = 99, kick = false, spinX = 99, spinY = 99 },
-        snapshots = new_snapshot_buffer(), snapshotWrite = 0, snapshotCount = 0,
+        snapshotBufferSize = config.network.snapshotBufferSize,
+        snapshots = new_snapshot_buffer(config.network.snapshotBufferSize), snapshotWrite = 0, snapshotCount = 0,
         latest = protocol.new_snapshot(), sampled = protocol.new_snapshot(), hasSnapshot = false, connected = false,
         predictionAccumulator = 0, predictionDt = config.fixed_dt, lastCommand = { moveX = 0, moveY = 0, kick = false, spinX = 0, spinY = 0 },
-        localPlayerIndex = 0,
+        localPlayerIndex = 0, teamMenuOpen = true,
         message = "Conectando...", closed = false }, Session)
 end
 
@@ -52,7 +84,7 @@ local function peer_row(s, peer)
 end
 
 function Session:_send(peer, packet, reliable)
-    self.room.endpoint:send(peer, packet, reliable)
+    return self.simulator:send(self.elapsed, self.room.endpoint, self.role == "client", peer, packet, reliable)
 end
 
 function Session:_host_accept(peer, version)
@@ -68,9 +100,21 @@ function Session:_host_accept(peer, version)
     local team = red <= blue and "red" or "blue"
     local index = self.game:add_player(team)
     if not index then index = 0 end -- sala cheia: entrada como espectador.
-    self.peers[peer] = { index = index, command = { moveX = 0, moveY = 0, kick = false, spinX = 0, spinY = 0 },
+    if index > 0 then set_player_team(self.game, index, team) end
+    self.localTeamMenuOpen = true
+    self.peers[peer] = { index = index, teamMenuOpen = true,
+        command = { moveX = 0, moveY = 0, kick = false, spinX = 0, spinY = 0 },
+        incoming = { moveX = 0, moveY = 0, kick = false, spinX = 0, spinY = 0 },
         lastSequence = -1, lastSeen = self.elapsed }
     self:_send(peer, protocol.pack_welcome(index), true)
+    for other in pairs(self.peers) do
+        if other ~= peer then
+            self.peers[other].teamMenuOpen = true
+            local cmd = self.peers[other].command
+            cmd.moveX, cmd.moveY, cmd.kick, cmd.spinX, cmd.spinY = 0, 0, false, 0, 0
+            self:_send(other, protocol.pack_event(3, 0, 0, 0, 0, index), true)
+        end
+    end
     if index > 0 then self.room:set_lobby_state(#self.game.players, self.game.mode_name) end
 end
 
@@ -99,10 +143,46 @@ function Session:_host_packet(peer, packet)
         if kind == "hello" then self:_host_accept(peer, version) end
     elseif tag == "I" then
         local row = peer_row(self, peer)
-        if row and row.index > 0 and protocol.unpack_input(packet, row.command) then
-            if row.lastSequence < 0 or sequence_is_newer(row.command.seq, row.lastSequence) then
-                row.lastSequence, row.lastSeen = row.command.seq, self.elapsed
+        if row and protocol.unpack_input(packet, row.incoming) then
+            if row.lastSequence < 0 or sequence_is_newer(row.incoming.seq, row.lastSequence) then
+                row.lastSequence, row.lastSeen = row.incoming.seq, self.elapsed
+                if row.index > 0 then copy_command(row.command, row.incoming) end
             end
+        end
+    elseif tag == "T" then
+        local row = peer_row(self, peer)
+        local team_code = protocol.unpack_team(packet)
+        if row and team_code then
+            row.teamMenuOpen = false
+            local team = team_code == 1 and "red" or (team_code == 2 and "blue" or nil)
+            if not team then
+                if row.index > 1 then
+                    self:_host_disconnect_player(peer, row)
+                    row.index = 0
+                end
+            elseif team_is_full(self.game, team, row.index) then
+                row.teamMenuOpen = true
+                self:_send(peer, protocol.pack_event(4, 0, 0, 0, 0, row.index), true)
+                return
+            elseif row.index > 0 then
+                set_player_team(self.game, row.index, team)
+            else
+                row.index = self.game:add_player(team) or 0
+                if row.index > 0 then set_player_team(self.game, row.index, team) end
+            end
+            self:_send(peer, protocol.pack_welcome(row.index), true)
+            self.room:set_lobby_state(#self.game.players, self.game.mode_name)
+        end
+    end
+end
+
+function Session:_host_disconnect_player(peer, row)
+    local removed = row.index
+    self.game:remove_player(removed)
+    for other, other_row in pairs(self.peers) do
+        if other ~= peer and other_row.index > removed then
+            other_row.index = other_row.index - 1
+            self:_send(other, protocol.pack_event(2, 0, 0, 0, 0, other_row.index), true)
         end
     end
 end
@@ -111,6 +191,7 @@ function Session:_client_packet(event, packet)
     if event == "disconnect" then
         self.connected = false
         self.message = "O host encerrou a sala ou a conexão caiu."
+        self.failed = true
         return
     end
     if type(packet) ~= "string" or #packet == 0 then return end
@@ -130,12 +211,12 @@ function Session:_client_packet(event, packet)
             end
         end
     elseif tag == "S" then
-        self.snapshotWrite = self.snapshotWrite % SNAPSHOT_BUFFER_SIZE + 1
+        self.snapshotWrite = self.snapshotWrite % self.snapshotBufferSize + 1
         local row = self.snapshots[self.snapshotWrite]
         if protocol.unpack_snapshot(packet, row.state) then
             row.time = self.elapsed
             self.latest = row.state
-            self.snapshotCount = math.min(self.snapshotCount + 1, SNAPSHOT_BUFFER_SIZE)
+            self.snapshotCount = math.min(self.snapshotCount + 1, self.snapshotBufferSize)
             self.hasSnapshot, self.lastSnapshotAt = true, self.elapsed
         end
         self.message = "Conectado."
@@ -162,6 +243,11 @@ function Session:_client_packet(event, packet)
             self.game.is_goal_delay = state_name == protocol.state_names[7]
         elseif code == 2 then
             self.localPlayerIndex = new_index or self.localPlayerIndex
+        elseif code == 3 then
+            self.teamMenuOpen = true
+        elseif code == 4 then
+            self.teamMenuOpen = true
+            self.message = "Esse time está cheio. Escolha o outro time ou espectador."
         end
     end
 end
@@ -186,7 +272,7 @@ function Session:_service_client()
         local event, _, _, packet = self.room.endpoint:receive(0)
         if not event then break end
         if event == "connect" then
-            self.room.endpoint:send(protocol.pack_hello(), true)
+            self:_send(nil, protocol.pack_hello(), true)
         elseif event == "receive" then
             self:_client_packet(event, packet)
         elseif event == "disconnect" then
@@ -209,6 +295,7 @@ end
 function Session:update(dt, local_command)
     if self.closed then return end
     self.elapsed = self.elapsed + dt
+    self.simulator:flush(self.elapsed, self.room.endpoint, self.role == "client")
     if self.role == "host" then
         self:_service_host()
         if self.room.discovery then self.room:update(dt, #self.game.players, self.game.mode_name) end
@@ -220,10 +307,10 @@ function Session:update(dt, local_command)
         local_command = local_command or ZERO_COMMAND
         copy_command(self.lastCommand, local_command)
         self.predictionDt = math.min(dt, self.config.max_dt_acc)
-        if self.connected and self.localPlayerIndex > 0 and
-           (not same_command(local_command, self.lastInput) or self.inputElapsed >= self.config.network.inputKeepalive) then
+        if self.connected and (self.inputElapsed >= self.config.network.inputKeepalive or
+           (self.localPlayerIndex > 0 and not same_command(local_command, self.lastInput))) then
             self.inputSequence = (self.inputSequence + 1) % 65536
-            self.room.endpoint:send(protocol.pack_input(self.inputSequence, local_command), false)
+            self:_send(nil, protocol.pack_input(self.inputSequence, local_command), false)
             copy_command(self.lastInput, local_command)
             self.inputElapsed = 0
         end
@@ -244,6 +331,7 @@ function Session:update(dt, local_command)
             end
         end
     end
+    self.simulator:flush(self.elapsed, self.room.endpoint, self.role == "client")
 end
 
 function Session:apply_snapshot()
@@ -252,11 +340,11 @@ function Session:apply_snapshot()
     if self.snapshotCount >= 2 then
         local target = self.elapsed - self.config.network.interpolationDelay
         local before, after
-        local oldest = (self.snapshotWrite - self.snapshotCount) % SNAPSHOT_BUFFER_SIZE + 1
+        local oldest = (self.snapshotWrite - self.snapshotCount) % self.snapshotBufferSize + 1
         local previous = self.snapshots[oldest]
         before, after = previous, previous
         for offset = 1, self.snapshotCount - 1 do
-            local index = (oldest + offset - 1) % SNAPSHOT_BUFFER_SIZE + 1
+            local index = (oldest + offset - 1) % self.snapshotBufferSize + 1
             local row = self.snapshots[index]
             if row.time <= target then before = row end
             if row.time >= target then after = row; break end
@@ -291,6 +379,12 @@ function Session:apply_snapshot()
             else
                 p.x, p.y = s.players[i].x, s.players[i].y
             end
+            local team = s.players[i].teamCode == 1 and "red" or "blue"
+            if p.team ~= team then
+                local x, y, px, py = p.x, p.y, p.prev_x, p.prev_y
+                set_player_team(g, i, team)
+                p.x, p.y, p.prev_x, p.prev_y = x, y, px, py
+            end
         end
     end
     return true
@@ -303,7 +397,8 @@ function Session:apply_host_inputs()
         command.moveX, command.moveY, command.kick, command.spinX, command.spinY = 0, 0, false, 0, 0
     end
     for _, row in pairs(self.peers) do
-        if row.index > 0 and row.index <= #self.game.commands and self.elapsed - row.lastSeen <= self.config.network.timeoutSeconds then
+        if row.index > 0 and not row.teamMenuOpen and row.index <= #self.game.commands and
+           self.elapsed - row.lastSeen <= self.config.network.timeoutSeconds then
             copy_command(self.game.commands[row.index], row.command)
         end
     end
@@ -332,11 +427,49 @@ end
 
 function Session:set_mode(mode)
     if self.role ~= "host" or (mode ~= "2v2" and mode ~= "3v3" and mode ~= "4v4" and mode ~= "5v5") then return false end
-    local count = #self.game.players
+    local count = math.min(#self.game.players, self.game.config.formations[mode].capacity * 2)
+    local teams = {}
+    for i = 1, count do teams[i] = self.game.players[i].team end
     self.game:set_mode(mode, count)
+    for i = 1, count do set_player_team(self.game, i, teams[i] or self.game.players[i].team) end
+    for peer, row in pairs(self.peers) do
+        if row.index > count then
+            row.index = 0
+            self:_send(peer, protocol.pack_welcome(0), true)
+        end
+    end
     self.lastState = self.game.referee.state
     self.room:set_lobby_state(count, mode)
     return true
+end
+
+function Session:set_team(team, player_index)
+    if self.role == "client" then
+        local sent = self:_send(nil, protocol.pack_team(team), true)
+        self.teamMenuOpen = false
+        return sent
+    end
+    player_index = player_index or 1
+    local changed = set_player_team(self.game, player_index, team)
+    if player_index == 1 then self.localTeamMenuOpen = false end
+    return changed
+end
+
+function Session:ping_rows()
+    local rows = {}
+    if self.role == "client" then
+        local ping = self.room.endpoint:ping_ms()
+        rows[1] = "Sua conexão: " .. (ping and (ping .. " ms") or "medindo")
+        return rows
+    end
+    rows[1] = "Jogador local: host"
+    for _, row in pairs(self.peers) do
+        if row.index > 0 then
+            local ping = self.room.endpoint:ping_ms(_)
+            rows[#rows + 1] = "Jogador " .. row.index .. ": " .. (ping and (ping .. " ms") or "medindo")
+        end
+    end
+    return rows
 end
 
 function Session:close()

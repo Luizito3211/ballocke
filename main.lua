@@ -10,6 +10,8 @@ local referee_mod = require "src.referee"
 local EventLog = require "src.event_log"
 local net_lobby = require "net.lobby"
 local net_session_mod = require "net.session"
+local connection_test_mod = require "net.connection_test"
+local menu_mod = require "src.menu"
 
 local game_inst
 local ui_inst
@@ -20,6 +22,10 @@ local event_log
 local network_session
 local app_screen = "menu"
 local network_error = ""
+local menu_state = menu_mod.new()
+local room_browser
+local connection_test
+local show_ping = false
 local network_command = { moveX = 0, moveY = 0, kick = false, spinX = 0, spinY = 0 }
 
 local accumulator = 0
@@ -66,12 +72,17 @@ function love.initialize_game(filesystem, num_players, game_config, no_event_log
 end
 
 function love.start_host(port)
+    if room_browser then room_browser:close(); room_browser = nil end
+    if connection_test then connection_test:close(); connection_test = nil end
     port = tonumber(port) or config.network.defaultPort
     local room, err = net_lobby.host(port, "Sala RS", config.network.discoveryPort)
     if not room then network_error, app_screen = err, "menu"; return false end
     love.initialize_game(nil, 1, nil, true)
     game_inst:set_mode("2v2", 1)
     game_inst.is_training = false
+    calibration_inst.presentationOnly = true
+    calibration_inst:apply()
+    calibration_inst:refresh()
     event_log = EventLog.new(love.filesystem, config.eventLog)
     referee_mod.attach_event_log(game_inst.referee, event_log)
     network_session = net_session_mod.new_host(room, game_inst, config)
@@ -82,6 +93,8 @@ function love.start_host(port)
 end
 
 function love.start_join(address)
+    if room_browser then room_browser:close(); room_browser = nil end
+    if connection_test then connection_test:close(); connection_test = nil end
     local room, err = net_lobby.join(address)
     if not room then network_error, app_screen = err, "menu"; return false end
     love.initialize_game(nil, 10, nil, true)
@@ -92,8 +105,73 @@ function love.start_join(address)
     return true
 end
 
+local function enter_menu(screen)
+    if room_browser then room_browser:close(); room_browser = nil end
+    if connection_test then connection_test:close(); connection_test = nil end
+    menu_state.screen, menu_state.input, menu_state.error = screen or "home", false, ""
+    app_screen = "menu"
+    if menu_state.screen == "join" then
+        room_browser, network_error = net_lobby.browser(config.network.discoveryPort)
+        if not room_browser then menu_state.screen = "home" end
+    end
+end
+
+local function launch_connection_test()
+    local address = menu_state.address
+    local ip, port_text = address:match("^([%d%.]+):(%d+)$")
+    if not ip then ip, port_text = address, tostring(config.network.connectionTestPort) end
+    if not require("net.discovery").valid_address(ip .. ":" .. port_text) then
+        network_error = "Digite um IPv4 válido do receptor."
+        return
+    end
+    connection_test, network_error = connection_test_mod.client(ip, tonumber(port_text), config.network)
+end
+
+local function menu_keypressed(key)
+    if menu_state.screen == "home" then
+        if key == "up" then menu_state.selection = math.max(1, menu_state.selection - 1)
+        elseif key == "down" then menu_state.selection = math.min(4, menu_state.selection + 1)
+        elseif key == "return" or key == "kpenter" then
+            if menu_state.selection == 1 then love.start_host(config.network.defaultPort)
+            elseif menu_state.selection == 2 then enter_menu("join")
+            elseif menu_state.selection == 3 then menu_state.screen = "connection"
+            else love.event.quit() end
+        elseif key == "escape" then love.event.quit() end
+    elseif menu_state.screen == "join" then
+        local rooms = room_browser and room_browser.rooms or {}
+        if menu_state.input then
+            if key == "escape" then menu_state.input = false
+            elseif key == "backspace" then menu_state.address = menu_state.address:sub(1, -2)
+            elseif key == "return" or key == "kpenter" then
+                local address = menu_state.address
+                if address == "" and rooms[menu_state.room_index] then address = rooms[menu_state.room_index].address end
+                if address ~= "" then love.start_join(address) end
+            end
+        elseif key == "escape" then enter_menu("home")
+        elseif key == "m" then menu_state.input, menu_state.address = true, ""
+        elseif key == "up" then menu_state.room_index = math.max(1, menu_state.room_index - 1)
+        elseif key == "down" then menu_state.room_index = math.min(math.max(1, #rooms), menu_state.room_index + 1)
+        elseif key == "return" or key == "kpenter" then
+            if rooms[menu_state.room_index] then love.start_join(rooms[menu_state.room_index].address) end
+        end
+    elseif menu_state.screen == "connection" then
+        if menu_state.input then
+            if key == "escape" then menu_state.input = false
+            elseif key == "backspace" then menu_state.address = menu_state.address:sub(1, -2)
+            elseif key == "return" or key == "kpenter" then launch_connection_test() end
+        elseif key == "escape" then enter_menu("home")
+        elseif key == "r" then
+            if connection_test then connection_test:close() end
+            connection_test, network_error = connection_test_mod.receiver(config.network.connectionTestPort, config.network)
+            menu_state.addresses = require("net.discovery").local_ipv4_addresses(config.network.connectionTestPort)
+        elseif key == "m" then menu_state.input, menu_state.address = true, ""
+        elseif key == "c" then menu_state.input = true end
+    end
+end
+
 -- Harness usado somente por --test para renderizar overlays sem alterar o jogo normal.
 function love.configure_smoke_overlays(enabled)
+    if enabled then app_screen = "host" end
     show_debug = enabled
     show_colliders = enabled
     if calibration_inst then calibration_inst.open = enabled end
@@ -120,6 +198,7 @@ function love.load(arg, unfiltered_arg)
     end
 
     spin_keyboard_enabled = (config.spin_selector and config.spin_selector.local_keyboard_enabled) or false
+    menu_state.port = config.network.connectionTestPort
 
     -- Inicialização do jogo e interface
     local arguments = arg or unfiltered_arg or _G.arg or {}
@@ -142,6 +221,11 @@ function love.resize(w, h)
 end
 
 function love.update(dt)
+    if app_screen == "menu" then
+        if room_browser then room_browser:update(dt) end
+        if connection_test then connection_test:update(dt) end
+        return
+    end
     if not game_inst then return end
     if event_log then event_log:update(dt) end
     last_dt = dt
@@ -154,6 +238,13 @@ function love.update(dt)
         network_session.localPlayerIndex or 1
     if network_session and network_session.role == "client" and target_p then target_p.allow_spin = true end
     if network_session and network_session.role == "host" then network_session:update(dt) end
+    if network_session and network_session.role == "client" and network_session.failed then
+        network_error = network_session.message
+        network_session:close()
+        network_session = nil
+        enter_menu("home")
+        return
+    end
 
     if calibration_inst and calibration_inst.open and not network_session then
         local alpha = accumulator / config.fixed_dt
@@ -180,6 +271,7 @@ function love.update(dt)
     input_mod.update_keyboard_spin(target_p, dt, config.spin_selector.move_speed, spin_keyboard_enabled)
     if network_session and network_session.role == "client" then
         local mx, my, kick = input_mod.get_movement_and_kick(config.players[1].keys)
+        if network_session.teamMenuOpen then mx, my, kick = 0, 0, false end
         network_command.moveX, network_command.moveY, network_command.kick = mx, my, kick
         network_command.spinX, network_command.spinY = target_p.spin_x, target_p.spin_y
         network_session:update(dt, network_command)
@@ -190,6 +282,10 @@ function love.update(dt)
         local steps = 0
         while accumulator >= config.fixed_dt and steps < config.max_physics_steps do
             input_mod.poll_player_command(game_inst.players[1], game_inst.commands[1])
+            if network_session and network_session.localTeamMenuOpen then
+                local command = game_inst.commands[1]
+                command.moveX, command.moveY, command.kick, command.spinX, command.spinY = 0, 0, false, 0, 0
+            end
             if network_session then network_session:apply_host_inputs() end
             game_inst:step_fixed(config.fixed_dt, game_inst.commands)
             if network_session then network_session:after_host_tick() end
@@ -218,6 +314,10 @@ function love.quit()
 end
 
 function love.draw()
+    if app_screen == "menu" then
+        menu_mod.draw(menu_state, room_browser and room_browser.discovery, connection_test, network_error)
+        return
+    end
     if not game_inst or not game_inst.field then return end
     local vw = config.viewport.width
     local vh = config.viewport.height
@@ -278,6 +378,30 @@ function love.draw()
         love.graphics.setColor(1, 0.95, 0.65, 1)
         love.graphics.printf(network_session.message, 60, 160, vw - 120, "center")
     end
+    if network_session and ((network_session.role == "host" and network_session.localTeamMenuOpen) or
+       (network_session.role == "client" and network_session.teamMenuOpen)) then
+        love.graphics.setColor(0, 0, 0, 0.82)
+        love.graphics.rectangle("fill", 220, vh * 0.36, vw - 440, 126, 10, 10)
+        love.graphics.setColor(1, 0.9, 0.38, 1)
+        love.graphics.setFont(ui_inst.font_ref)
+        love.graphics.printf("ESCOLHA SEU TIME", 230, vh * 0.39, vw - 460, "center")
+        love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.setFont(ui_inst.font_hud)
+        love.graphics.printf("1 — Vermelho     2 — Azul     3 — Espectador", 230, vh * 0.48, vw - 460, "center")
+        love.graphics.printf("Seu jogador fica parado até confirmar", 230, vh * 0.54, vw - 460, "center")
+    end
+    if network_session then
+        love.graphics.setColor(0.8, 0.85, 0.9, 0.7)
+        love.graphics.printf("TAB: ping  •  F2: modo (host)  •  1/2/3: time/espectador", 12, vh - 26, vw - 24, "center")
+    end
+    if show_ping and network_session then
+        love.graphics.setColor(0, 0, 0, 0.72)
+        love.graphics.rectangle("fill", vw - 330, 36, 310, math.max(55, #network_session:ping_rows() * 22 + 16), 6, 6)
+        love.graphics.setColor(1, 1, 1, 1)
+        love.graphics.setFont(ui_inst.font_hud)
+        local rows = network_session:ping_rows()
+        for i = 1, #rows do love.graphics.print(rows[i], vw - 318, 44 + (i - 1) * 22) end
+    end
     love.graphics.setScissor()
     love.graphics.pop()
 end
@@ -289,6 +413,7 @@ function love.mousepressed(x, y, button)
 end
 
 function love.keypressed(key)
+    if app_screen == "menu" then menu_keypressed(key); return end
     if referee_panel_open then
         local r = game_inst.referee
         if key == "f6" or key == "escape" then referee_panel_open = false
@@ -345,7 +470,7 @@ function love.keypressed(key)
         else calibration_inst:adjust(key) end
         return
     end
-    if key == "f5" and game_inst and game_inst.is_training then calibration_inst.open = true; return end
+    if key == "f5" and game_inst and (game_inst.is_training or network_session) then calibration_inst.open = true; return end
     if key == "f6" and game_inst and game_inst.is_training then
         referee_panel_open = true
         ui_inst:refresh_test_panel(game_inst.referee.testShortRestarts, game_inst.referee.testOneMinute, referee_test_touch)
@@ -359,6 +484,13 @@ function love.keypressed(key)
         game_inst.camera.viewHeight = config.camera.viewWidth * config.viewport.height / config.viewport.width
         love.filesystem.write("view_width.txt", tostring(config.camera.viewWidth))
         if calibration_inst then calibration_inst.viewWidth = config.camera.viewWidth; calibration_inst:refresh() end
+        return
+    end
+    if key == "tab" then show_ping = true; return end
+    if network_session and (key == "1" or key == "2" or key == "3") then
+        local team = key == "1" and "red" or (key == "2" and "blue" or nil)
+        if network_session.role == "client" then network_session:set_team(team)
+        elseif team then network_session:set_team(team, 1) end
         return
     end
     if key == config.keys.quit then
@@ -381,8 +513,12 @@ function love.keypressed(key)
             for i = 1, #config.mode_names do
                 if config.mode_names[i] == game_inst.mode_name then current_index = i; break end
             end
-            local next_index = current_index % #config.mode_names + 1
-            game_inst:set_mode(config.mode_names[next_index], 2)
+            local next_index = current_index < 2 and 2 or (current_index >= #config.mode_names and 2 or current_index + 1)
+            if network_session and network_session.role == "host" then
+                network_session:set_mode(config.mode_names[next_index])
+            else
+                game_inst:set_mode(config.mode_names[next_index], 2)
+            end
             if event_log then
                 referee_mod.attach_event_log(game_inst.referee, event_log)
                 referee_mod.record_reposition(game_inst.referee, "jogadores", "reposicionamento manual ao trocar modo F2")
@@ -396,5 +532,15 @@ function love.keypressed(key)
         -- Tecla de reset do efeito (padrão C)
         local target_p = game_inst and game_inst.players[1]
         if target_p then target_p:reset_spin() end
+    end
+end
+
+function love.keyreleased(key)
+    if key == "tab" then show_ping = false end
+end
+
+function love.textinput(text)
+    if app_screen == "menu" and menu_state.input and #menu_state.address < 64 then
+        menu_state.address = menu_state.address .. text
     end
 end

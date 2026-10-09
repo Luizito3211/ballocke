@@ -41,7 +41,7 @@ function Endpoint:send(peer, payload, reliable)
     end
     if not peer or type(payload) ~= "string" then return false end
     local channel = reliable and 1 or 0
-    local flags = reliable and "reliable" or nil
+    local flags = reliable and "reliable" or "unreliable"
     local ok, sent = pcall(peer.send, peer, payload, channel, flags)
     return ok and sent ~= false
 end
@@ -61,6 +61,14 @@ end
 
 function Endpoint:flush()
     if not self.closed then self.host:flush() end
+end
+
+function Endpoint:ping_ms(peer)
+    if self.closed then return nil end
+    peer = self.role == "client" and self.peer or peer
+    if not peer or not peer.round_trip_time then return nil end
+    local ok, value = pcall(peer.round_trip_time, peer)
+    return ok and value or nil
 end
 
 function Endpoint:disconnect(peer, data)

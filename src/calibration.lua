@@ -23,15 +23,17 @@ end
 
 function calibration.apply(s)
     local cfg, g = s.config, s.game
-    for i = 1, #g.players do
-        local p = g.players[i]
-        p.acceleration = cfg.player.acceleration * s.accelerationFactor
-        p.max_speed = cfg.player.max_speed
-        p.damping = s.playerDamping
-        p.kick_strength = cfg.player.kick_strength * s.kickFactor
+    if not s.presentationOnly then
+        for i = 1, #g.players do
+            local p = g.players[i]
+            p.acceleration = cfg.player.acceleration * s.accelerationFactor
+            p.max_speed = cfg.player.max_speed
+            p.damping = s.playerDamping
+            p.kick_strength = cfg.player.kick_strength * s.kickFactor
+        end
+        g.ball.damping = s.ballDamping
+        g.scratch_ball.damping = s.ballDamping
     end
-    g.ball.damping = s.ballDamping
-    g.scratch_ball.damping = s.ballDamping
     g.camera.viewWidth = s.viewWidth
     g.camera.viewHeight = s.viewWidth * cfg.viewport.height / cfg.viewport.width
     g.camera.weight = s.cameraWeight
@@ -71,7 +73,9 @@ function calibration.refresh(s)
     s.text[4]:set(string.format("Atrito jogador: %.3f", s.playerDamping))
     s.text[5]:set(string.format("viewWidth: %.0f", s.viewWidth))
     s.text[6]:set(string.format("Peso da camera: %.2f", s.cameraWeight))
-    s.text[7]:set("Setas: selecionar/ajustar | S: salvar | F5: fechar")
+    s.text[7]:set(s.presentationOnly and
+        "Host: fisica apenas previa; camera local | S: salvar | F5: fechar" or
+        "Setas: selecionar/ajustar | S: salvar | F5: fechar")
     local time, dist, pct, ratio = calibration.metrics(s)
     s.metric_text[1]:set(string.format("Travessia estimada: %.2f s", time))
     s.metric_text[2]:set(string.format("Chute maximo: %.0f unidades (%.1f%% da quadra)", dist, pct))

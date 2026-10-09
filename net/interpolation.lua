@@ -22,6 +22,7 @@ function interpolation.sample(before, after, alpha, out)
     for i = 1, after.playerCount do
         out.players[i].x = interpolation.lerp(before.players[i].x, after.players[i].x, alpha)
         out.players[i].y = interpolation.lerp(before.players[i].y, after.players[i].y, alpha)
+        out.players[i].teamCode = after.players[i].teamCode
     end
     return out
 end

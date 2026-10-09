@@ -950,7 +950,25 @@ function tests.run()
             not protocol.unpack_input(packet:sub(1, #packet - 1), {})
         local kind, version, player_index = protocol.unpack_handshake(protocol.pack_welcome(4))
         local handshake_ok = kind == "welcome" and version == protocol.VERSION and player_index == 4
-        assert_test("Protocolo serializa INPUT validado e handshake com versao/protocolo", input_ok and handshake_ok)
+        local team_packet = protocol.pack_team("blue")
+        local team_ok = protocol.unpack_team(team_packet) == 2 and protocol.unpack_team("T\255") == nil
+        assert_test("Protocolo serializa INPUT, time e handshake com versao/protocolo", input_ok and handshake_ok and team_ok)
+    end
+
+    do
+        local simulator = require "net.simulator"
+        local sent = 0
+        local endpoint = { send = function() sent = sent + 1; return true end }
+        local delayed = simulator.new(50, 0, 4, 1)
+        delayed:send(0, endpoint, true, nil, "hello", true)
+        delayed:flush(0.049, endpoint, true)
+        local waited = sent == 0
+        delayed:flush(0.05, endpoint, true)
+        local dropped = simulator.new(0, 100, 4, 1)
+        local kept = not dropped:send(0, endpoint, true, nil, "drop", false)
+        local reliable = dropped:send(0, endpoint, true, nil, "event", true)
+        assert_test("Simulador de rede injeta atraso e perda configuráveis",
+            waited and sent == 2 and kept and reliable and dropped.dropped == 1)
     end
 
     do
@@ -959,6 +977,7 @@ function tests.run()
         g.ball.x, g.ball.y, g.ball.vx, g.ball.vy = -123.25, 55.5, 210, -32
         g.score_p1, g.score_p2 = 3, 2
         g.players[10].x, g.players[10].y = 1111.25, -444.5
+        g.players[10].team = "blue"
         local packet = protocol.pack_snapshot(g, 512, 256)
         local decoded = protocol.new_snapshot()
         local ok = #packet == protocol.SNAPSHOT_SIZE and protocol.unpack_snapshot(packet, decoded)
@@ -966,7 +985,7 @@ function tests.run()
             ok and decoded.sequence == 512 and decoded.acknowledgedSequence == 256 and
             decoded.playerCount == 10 and math.abs(decoded.ballX + 123.25) < 0.01 and
             decoded.scoreRed == 3 and decoded.scoreBlue == 2 and
-            math.abs(decoded.players[10].x - 1111.25) < 0.01 and
+            math.abs(decoded.players[10].x - 1111.25) < 0.01 and decoded.players[10].teamCode == 2 and
             not protocol.unpack_snapshot(packet:sub(1, #packet - 1), decoded))
     end
 
@@ -981,14 +1000,16 @@ function tests.run()
         host:_host_accept(peer, protocol.VERSION)
         local accepted = host.peers[peer] and host.peers[peer].index == 2 and #g.players == 2
         host:_host_packet(peer, protocol.pack_input(7, { moveX = 1, moveY = -1, kick = true, spinX = 0.5, spinY = 0 }))
+        host:_host_packet(peer, protocol.pack_team("red"))
         host:apply_host_inputs()
         local command = g.commands[2]
         local applied = command.moveX == 1 and command.moveY == -1 and command.kick and command.spinX > 0.49
+        local team_menu = host.localTeamMenuOpen and not host.peers[peer].teamMenuOpen and g.players[2].team == "red"
         local unknown_peer = {}
         host:_host_accept(unknown_peer, protocol.VERSION + 1)
         local refused = sent and sent:sub(1, 1) == "E" and host.peers[unknown_peer] == nil
-        assert_test("Host aceita comandos validados, limita entrada a jogadores e recusa protocolo divergente",
-            accepted and applied and refused)
+        assert_test("Host aceita comandos, aplica seleção de time e recusa protocolo divergente",
+            accepted and applied and team_menu and refused)
     end
 
     do
@@ -1046,6 +1067,31 @@ function tests.run()
         assert_test("Interpolacao calcula estados entre snapshots e preserva metadados autoritativos",
             out.ballX == 25 and out.ballY == 15 and out.players[1].x == -50 and
             out.players[1].y == 30 and out.scoreRed == 2 and out.playerCount == 1)
+    end
+
+    do
+        local connection_test = require "net.connection_test"
+        assert_test("Teste de conexão calcula perda sem divisão por zero e limita a 100%",
+            connection_test.loss_percent(0, 0) == 0 and connection_test.loss_percent(20, 5) == 25 and
+            connection_test.loss_percent(2, 9) == 100)
+    end
+
+    do
+        local menu_mod = require "src.menu"
+        local m = menu_mod.new()
+        local canvas = love.graphics.newCanvas(1280, 720)
+        local ok, err = xpcall(function()
+            love.graphics.setCanvas(canvas)
+            m.screen = "home"; menu_mod.draw(m)
+            m.screen = "join"; menu_mod.draw(m, { rooms = { { name = "LAN", address = "127.0.0.1:7777", players = 1, mode = "2v2" } } })
+            m.screen, m.port, m.addresses = "connection", 7779, { "127.0.0.1" }
+            menu_mod.draw(m, nil, { role = "receiver", port = 7779, received = 0 })
+            menu_mod.draw(m, nil, { role = "client", port = 7779, ping = 1.2, sent = 10, received = 9,
+                packet_loss = function() return 10 end })
+        end, debug.traceback)
+        love.graphics.setCanvas()
+        canvas:release()
+        assert_test("Menu desenha início, descoberta e ambos os papéis do teste de conexão", ok, tostring(err))
     end
 
     do

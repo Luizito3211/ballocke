@@ -10,7 +10,7 @@ protocol.team_code = { red = 1, blue = 2 }
 protocol.state_names, protocol.kind_names = state_names, kind_names
 
 local snapshot_format = "<c1I2I2I1i2i2i2i2I1I1I1I2I1I1I1i2i2I1I2I2"
-for _ = 1, protocol.MAX_PLAYERS do snapshot_format = snapshot_format .. "i2i2" end
+for _ = 1, protocol.MAX_PLAYERS do snapshot_format = snapshot_format .. "i2i2I1" end
 protocol.INPUT_SIZE = love.data.getPackedSize("<c1I2i1i1I1i1i1")
 protocol.SNAPSHOT_SIZE = love.data.getPackedSize(snapshot_format)
 
@@ -65,6 +65,17 @@ function protocol.unpack_input(packet, out)
     return true
 end
 
+function protocol.pack_team(team)
+    return love.data.pack("string", "<c1I1", "T", protocol.team_code[team] or 0)
+end
+
+function protocol.unpack_team(packet)
+    if type(packet) ~= "string" or #packet ~= 2 then return nil end
+    local ok, tag, code = pcall(love.data.unpack, "<c1I1", packet)
+    if not ok or tag ~= "T" or code > 3 then return nil end
+    return code
+end
+
 function protocol.pack_snapshot(game, sequence, acknowledged_sequence)
     local r, ball = game.referee, game.ball
     local values = { "S", clamp(sequence, 0, 65535), clamp(acknowledged_sequence, 0, 65535),
@@ -82,6 +93,7 @@ function protocol.pack_snapshot(game, sequence, acknowledged_sequence)
         local p = game.players[i]
         values[#values + 1] = p and clamp(p.x * 16, -32768, 32767) or 0
         values[#values + 1] = p and clamp(p.y * 16, -32768, 32767) or 0
+        values[#values + 1] = p and (p.team == "red" and 1 or 2) or 0
     end
     local packet = love.data.pack("string", snapshot_format, unpack(values))
     return packet
@@ -89,7 +101,7 @@ end
 
 function protocol.new_snapshot()
     local players = {}
-    for i = 1, protocol.MAX_PLAYERS do players[i] = { x = 0, y = 0 } end
+    for i = 1, protocol.MAX_PLAYERS do players[i] = { x = 0, y = 0, teamCode = 0 } end
     return { players = players, playerCount = 0 }
 end
 
@@ -108,8 +120,8 @@ function protocol.unpack_snapshot(packet, out)
     s.ballFrozen, s.zoneRadius, s.restartRemaining = values[18] == 1, values[19] / 16, values[20] / 10
     local offset = 21
     for i = 1, protocol.MAX_PLAYERS do
-        s.players[i].x, s.players[i].y = values[offset] / 16, values[offset + 1] / 16
-        offset = offset + 2
+        s.players[i].x, s.players[i].y, s.players[i].teamCode = values[offset] / 16, values[offset + 1] / 16, values[offset + 2]
+        offset = offset + 3
     end
     return true
 end

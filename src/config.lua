@@ -138,9 +138,13 @@ config.calibration = {
 }
 config.network = {
     protocolVersion = 1, defaultPort = 7777, discoveryPort = 47778,
+    connectionTestPort = 7779,
     maxPlayers = 10, maxPeers = 16, inputKeepalive = 0.10,
     snapshotRate = 30, timeoutSeconds = 10, interpolationDelay = 0.10,
     simulatedLatencyMs = 0, simulatedPacketLoss = 0,
+    snapshotBufferSize = 8, simulatorQueueSize = 512, simulatorSeed = 2463534242,
+    connectionTestInterval = 0.5, connectionTestTimeout = 2, connectionTestSlots = 16,
+    connectionTestMaxPacketsPerFrame = 32,
 }
 
 -- Quatro jogadores locais da versão-base; as formações suportam as futuras salas 3v3-5v5.

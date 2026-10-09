@@ -1,32 +1,31 @@
-# HaxBall Local
+# HaxBall Local — Real Soccer
 
-Jogo de futebol 2D local para até quatro pessoas no mesmo teclado, feito em Lua com LÖVE 11.5. A partida acontece em um único computador. O projeto ainda não implementa jogo online nem partidas em rede local.
+Jogo de futebol 2D em Lua puro para LÖVE 11.5. O host é autoritativo para física, árbitro, placar e relógio; os clientes enviam comandos e recebem snapshots. A conexão de jogo usa ENet/UDP. A descoberta de salas usa broadcast UDP e pode ser bloqueada entre laboratórios; nesse caso, entre pelo IPv4 e porta mostrados pelo host.
 
-## Como jogar
+## Como jogar online
 
-Abra o jogo e use os controles abaixo. `F2` percorre os modos 1v1, 2v2, 3v3, 4v4 e 5v5 sem mudar a quadra; nesta versão, o teclado controla no máximo quatro jogadores locais. `R` reinicia a partida e o placar; `Esc` encerra o jogo.
+No menu, escolha **Criar sala** no computador host ou **Entrar** nos outros computadores. O host abre a porta UDP 7777; os clientes digitam um endereço anunciado ou usam `IPv4:7777`. O host pode pressionar F2 para alternar 2v2 a 5v5. Todos podem pressionar 1 para vermelho, 2 para azul ou 3 para espectador. Teclas: WASD move, Espaço chuta, setas ajustam o efeito, C centraliza o efeito, +/− ajustam zoom, F3 mostra diagnóstico, F4 mostra colisores, F5 abre calibração local, TAB mostra ping, F11 alterna tela cheia e Esc encerra.
 
-| Ação | Jogador 1 (vermelho) | Jogador 2 (azul) | Jogador 3 (vermelho) | Jogador 4 (azul) |
-|---|---|---|---|---|
-| Cima | W | Seta para cima | I | Numpad 8 ou 8 |
-| Baixo | S | Seta para baixo | K | Numpad 5 ou 5 |
-| Esquerda | A | Seta para a esquerda | J | Numpad 4 ou 4 |
-| Direita | D | Seta para a direita | L | Numpad 6 ou 6 |
-| Chutar | Espaço | Shift direito | U | Numpad 0 ou 0 |
+## Testar a rede
 
-A quadra RS mede 3000 x 1500 unidades; o mundo usa (0, 0) no centro. A câmera acompanha o jogador e a bola com viewWidth inicial de 1500. Use + e - para ajustar o zoom, F5 para abrir o painel de calibração (somente no jogo local) e F4 para ver os colisores. F3 alterna o diagnóstico e F11 alterna janela e tela cheia.
-
-O mouse posiciona o ponto de contato no seletor de efeito no canto inferior direito. Clique em `[C]` ou pressione `C` para centralizá-lo.
+No menu, escolha **Teste de conexão**. No computador receptor, pressione R e informe aos outros o IPv4 e a porta 7779 mostrados. No outro computador, pressione C, digite esse IPv4 e pressione Enter. A tela mostra ping e perda estimada. O teste usa UDP e não inicia uma partida.
 
 ## Rodar o código
 
-Instale o LÖVE 11.x e, na raiz do projeto, execute:
+Instale/extraia o LÖVE 11.x e, na raiz do projeto, execute:
 
 ```sh
 love .
 ```
 
-No Windows, também é possível iniciar com `run.bat`. Para executar os testes de física pelo script, use `run.bat --test`.
+Para teste local de duas instâncias, abra dois terminais na raiz:
+
+```sh
+love . --host 7777
+love . --join 127.0.0.1:7777
+```
+
+No Windows, `run.bat` inicia o jogo e `run.bat --test` executa a suíte automatizada. A latência e perda simuladas podem ser ajustadas em `src/config.lua` (`simulatedLatencyMs` e `simulatedPacketLoss`).
 
 ## Baixar e jogar
 
@@ -38,4 +37,4 @@ O jogo pronto será publicado na página de Releases do GitHub. **Link da versã
 
 ## Gerar o build portátil
 
-No Windows, execute `build.bat` na raiz do projeto. O pacote final será gerado em `dist/HaxBallLocal.zip`. Consulte as instruções de publicação em `PUBLISHING.md` quando estiverem disponíveis.
+No Windows, execute `build.bat` na raiz do projeto. O pacote final será gerado em `dist/HaxBallLocal.zip`. Consulte `PUBLISHING.md` para as instruções de publicação.
